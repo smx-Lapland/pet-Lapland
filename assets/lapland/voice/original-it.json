@@ -1,0 +1,66 @@
+[
+  {
+    "file": "0.wav",
+    "text": "Hai qualcuno alle costole? Rifletti su chi potresti aver infastidito in passato."
+  },
+  {
+    "file": "1.wav",
+    "text": "Se qualcuno vuole vendicarsi, non esitare, fallo fuori. Quando decidi di usare un'arma, non ti serve un motivo per uccidere."
+  },
+  {
+    "file": "2.wav",
+    "text": "È da un po' che non ci si vede. Noto che Texas si è fatta nuovi amici. Che bello! Non vedo l'ora di conoscerli."
+  },
+  {
+    "file": "3.wav",
+    "text": "Ehi, Doc. Non ti dispiace se porto dentro le mie armi, vero? Mi metto comoda qui."
+  },
+  {
+    "file": "3星结束行动.wav",
+    "text": "Li ho fatti a fettine come una millefoglie. Come ti è sembrata?"
+  },
+  {
+    "file": "完成高难行动.wav",
+    "text": "È già finita? Che noia."
+  },
+  {
+    "file": "观看作战记录.wav",
+    "text": "Non è stupendo come continui a diventare sempre più potente?"
+  },
+  {
+    "file": "晋升后交谈1.wav",
+    "text": "Credi che sia un'assassina? Già, chiamami come vuoi. Posso essere chiunque, fare qualsiasi cosa, uccidere quando voglio, chiunque voglio."
+  },
+  {
+    "file": "晋升后交谈2.wav",
+    "text": "Adoro il potere, Doc! E tu mi hai offerto un lavoro dove posso usarlo a mio piacimento. Fantastico! L'unica cosa bella di questo mondo è usare il mio potere per conquistarlo."
+  },
+  {
+    "file": "信赖提升后交谈1.wav",
+    "text": "Texas mi teme, ma non voglio farle niente, tranne forse provare a farla rinsavire. È diventata un gattino impaurito."
+  },
+  {
+    "file": "信赖提升后交谈2.wav",
+    "text": "La rossa. Oh no, Doc, tienila lontana da me! Non ho speranze contro di lei. Ma questa sensazione, sento che, ah, perché non vedo l'ora di lottare con lei?"
+  },
+  {
+    "file": "信赖触摸.wav",
+    "text": "Più ti conosco più capisco Texas. Ottimo."
+  },
+  {
+    "file": "干员报到.wav",
+    "text": "Un grande male ostacola la giustizia. Mio padrone, in nome dell'odio e della vendetta, guida i più deboli."
+  },
+  {
+    "file": "精英化晋升1.wav",
+    "text": "È bello che ti fidi di me. Di certo non posso dire lo stesso di Texas."
+  },
+  {
+    "file": "编入队伍.wav",
+    "text": "Rendi Texas leader!"
+  },
+  {
+    "file": "非3星结束行动.wav",
+    "text": "Ho fatto di meglio. Prenditela pure con me se ne è scappato qualcuno."
+  }
+]

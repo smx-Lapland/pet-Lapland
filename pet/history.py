@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import sqlite3
 import re
 import json
@@ -29,6 +30,14 @@ class ConversationHistory:
     def __init__(self, path: Path | None = None):
         local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         self.path = path or local / "Mochi" / "history.sqlite3"
+
+    @classmethod
+    def for_scope(cls, project, session):
+        store = cls()
+        if project:
+            identity = hashlib.sha256(f"{project}/{session}".encode("utf-8")).hexdigest()
+            store.path = store.path.parent / "projects" / (identity + ".sqlite3")
+        return store
 
     def _ensure_tables(self, db):
         db.execute("""

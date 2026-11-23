@@ -33,6 +33,8 @@ class SpeechEngine:
         self.neural_voice = (cfg.get("neural_voice_it", "it-IT-ElsaNeural") if self.language == "it"
                              else cfg.get("neural_voice", "en-US-JennyNeural"))
         self.rate = int(cfg.get("rate", 0))
+        self.api = {k: cfg.get(k, "") for k in ("tts_base", "tts_model", "tts_voice", "tts_key_env")}
+        self.character_id = cfg.get("character_id", "lapland")
         self.muted = bool(cfg.get("muted", False))
         self.script_path = script_path
         self._powershell = self._find_powershell()
@@ -57,20 +59,28 @@ class SpeechEngine:
             except Exception:
                 pass
 
-    def prepare_segment(self, text, stop_event, provider):
+    def prepare_segment(self, text, stop_event, provider, emotion=None):
         if self.muted or stop_event.is_set():
             return None, "muted"
-        if provider in ("azure", "edge", "lapland"):
+        if provider in ("api", "piper", "azure", "edge", "lapland", "vits"):
             path = CACHE_DIR / f"tts_{uuid.uuid4().hex}.wav"
             job = {"path": str(path), "text": sanitize_for_tts(text, self.language), "rate": self.rate,
-                   "voice": self.neural_voice, "provider": provider, "language": self.language}
+                   "voice": self.neural_voice, "provider": provider, "language": self.language, "emotion": emotion}
+            if provider == "api":
+                job.update(self.api)
+            if provider == "piper":
+                from .characters import character
+                job["model_path"] = str(character(self.character_id).folder / "voice.onnx")
             try:
                 # Spawn the interpreter directly so cancellation also terminates
                 # native inference on Windows, where a venv launcher is a parent process.
                 python = getattr(sys, "_base_executable", None) or sys.executable
                 env = {**os.environ, "__PYVENV_LAUNCHER__": sys.executable}
+                timeout = 90 if provider in ("lapland", "vits", "api", "piper") else 18
+                if provider == "vits" and self.language == "it":
+                    timeout = 150  # A long reply may need an additional local synthesis and transcription.
                 ok = run_worker([python, str(Path(__file__).with_name("neural_worker.py"))],
-                                stop_event, 90 if provider == "lapland" else 18,
+                                stop_event, timeout,
                                 json.dumps(job).encode("utf-8"), env=env)
                 if ok and wav_duration(path) > 0:
                     return path, provider

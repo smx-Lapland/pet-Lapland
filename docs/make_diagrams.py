@@ -1,3 +1,4 @@
+from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 FONT_CN = r"C:\Windows\Fonts\msyh.ttc"
@@ -101,7 +102,7 @@ d.text((80, 1000), "Privacy boundary: selected region only  ·  no microphone  �
        font=font(18), fill="#64748B")
 d.text((1560, 1000), "v0.1 · 2026-11-22", font=font(18), fill="#64748B")
 
-img.save(r"E:\Mochi\assets\architecture.png")
+img.save(Path(__file__).resolve().parents[1] / "assets" / "architecture.png")
 
 # ---------- state machine ----------
 W, H = 1900, 560
@@ -137,6 +138,6 @@ d.text((90, 414), "Esc / too small  →  IDLE      ·      model error  →  ERR
 d.text((90, 456), "新一次 Ctrl+Alt+S 会开启新上下文；追问沿用上一张截图 + 最近 3 轮对话。",
        font=cn(20), fill="#93A4BC")
 d.text((70, 512), "v0.1 · 2026-11-22", font=font(16), fill="#64748B")
-img.save(r"E:\Mochi\assets\state-machine.png")
+img.save(Path(__file__).resolve().parents[1] / "assets" / "state-machine.png")
 
 print("diagrams saved")

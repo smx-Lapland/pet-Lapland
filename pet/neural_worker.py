@@ -13,6 +13,11 @@ import wave
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+if __package__:
+    from .network import AUDIO_LIMIT, open_api, read_body
+else:  # The speech engine runs this file as a standalone child process.
+    from network import AUDIO_LIMIT, open_api, read_body
+
 
 def azure_audio(text: str, voice: str, rate: str) -> bytes:
     region = os.environ.get("SPEECH_REGION", "").strip()
@@ -29,8 +34,8 @@ def azure_audio(text: str, voice: str, rate: str) -> bytes:
         headers={"Ocp-Apim-Subscription-Key": key, "Content-Type": "application/ssml+xml",
                  "X-Microsoft-OutputFormat": "riff-24khz-16bit-mono-pcm", "User-Agent": "pet-Lapland"},
     )
-    with urllib.request.urlopen(request, timeout=15) as response:
-        return response.read()
+    with open_api(request, timeout=15) as response:
+        return read_body(response, AUDIO_LIMIT)
 
 
 async def edge_audio(text: str, voice: str, rate: str) -> bytes:
@@ -39,6 +44,8 @@ async def edge_audio(text: str, voice: str, rate: str) -> bytes:
     audio = bytearray()
     async for chunk in edge_tts.Communicate(text, voice, rate=rate).stream():
         if chunk["type"] == "audio":
+            if len(audio) + len(chunk["data"]) > AUDIO_LIMIT:
+                raise ValueError("语音响应超过大小限制。")
             audio.extend(chunk["data"])
     return bytes(audio)
 
@@ -46,8 +53,54 @@ async def edge_audio(text: str, voice: str, rate: str) -> bytes:
 def main() -> None:
     job = json.loads(sys.stdin.buffer.read())
     path = Path(job["path"])
+    if job["provider"] == "piper":
+        import onnxruntime as ort
+        from piper import PiperVoice
+        from piper.config import PiperConfig, SynthesisConfig
+
+        model = Path(job["model_path"])
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 2
+        session = ort.InferenceSession(model.read_bytes(), sess_options=opts, providers=["CPUExecutionProvider"])
+        config = PiperConfig.from_dict(json.loads(Path(str(model) + ".json").read_text("utf-8")))
+        voice = PiperVoice(session, config)
+        with wave.open(str(path), "wb") as out:
+            voice.synthesize_wav(job["text"], out, syn_config=SynthesisConfig(length_scale=2 ** (-job["rate"]/10)))
+        return
+    if job["provider"] == "api":
+        import miniaudio
+        import numpy as np
+
+        env = job["tts_key_env"]
+        key = os.environ[env] if env else ""
+        body = {"model": job["tts_model"], "voice": job["tts_voice"], "input": job["text"],
+                "response_format": "wav"}
+        req = urllib.request.Request(job["tts_base"].rstrip("/") + "/audio/speech",
+                                     data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+        if key:
+            req.add_unredirected_header("Authorization", "Bearer " + key)
+        with open_api(req, timeout=75) as response:
+            pcm = miniaudio.decode(read_body(response, AUDIO_LIMIT), output_format=miniaudio.SampleFormat.FLOAT32,
+                                   nchannels=1, sample_rate=24000)
+        write_voice_wav(path, np.asarray(pcm.samples), pcm.sample_rate, job["rate"])
+        return
     if job["provider"] == "lapland":
-        lapland_audio(path, job["text"], job["language"], job["rate"])
+        lapland_audio(path, job["text"], job["language"], job["rate"], job.get("emotion"))
+        return
+    if job["provider"] == "vits":
+        if play_original_line(path, job["text"], job["language"], job["rate"]):
+            return
+        if not __package__:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from pet.vits_voice import RATE, ReferenceVoice
+        import numpy as np
+        import onnxruntime as ort
+
+        ort.set_seed(189)
+        np.random.seed(72)
+        voice = ReferenceVoice(job["language"])
+        audio = voice.render(job["text"], job.get("emotion"))
+        write_voice_wav(path, audio, RATE, job["rate"])
         return
     rate = f"{max(-90, min(100, int(job['rate']) * 10)):+d}%"
     args = (job["text"], job["voice"], rate)
@@ -94,12 +147,12 @@ def reduce_decoder_tones(audio, sample_rate):
     return audio + np.convolve(padded, kernel.astype(np.float32), mode="valid")
 
 
-def original_recording(text: str, voices: Path, corpus: Path) -> Path | None:
+def original_recording(text: str, voices: Path, corpus: Path, language: str = "en") -> Path | None:
     def words(line):
         line = unicodedata.normalize("NFKC", line).casefold().replace("’", "'")
         return re.findall(r"[^\W_]+(?:'[^\W_]+)*|[+%=<>/]", line)
 
-    catalog = voices / "original-en.json"
+    catalog = voices / f"original-{language}.json"
     if not catalog.is_file():
         return None
     requested = words(text)
@@ -109,6 +162,24 @@ def original_recording(text: str, voices: Path, corpus: Path) -> Path | None:
             if clip.is_file():
                 return clip
     return None
+
+
+def play_original_line(path, text, language, rate):
+    root = Path(__file__).resolve().parents[1]
+    clip = original_recording(text, root / "assets/lapland/voice",
+                              root / "models/pocket-tts/corpus" / language, language)
+    if clip is None:
+        return False
+    if rate:
+        import miniaudio
+        import numpy as np
+
+        pcm = miniaudio.decode(clip.read_bytes(), output_format=miniaudio.SampleFormat.FLOAT32,
+                               nchannels=1, sample_rate=44100)
+        write_voice_wav(path, np.asarray(pcm.samples), pcm.sample_rate, rate)
+    else:
+        shutil.copyfile(clip, path)
+    return True
 
 
 def pitch_stats(audio, rate):
@@ -233,7 +304,7 @@ def trim_phrase_join(audio, rate, trim_start, trim_end):
     return audio
 
 
-def render_english(model, text, bank, voices, corpus):
+def render_english(model, text, bank, voices, corpus, directed_prompt=None):
     import numpy as np
 
     parts = []
@@ -253,7 +324,9 @@ def render_english(model, text, bank, voices, corpus):
                                    nchannels=1, sample_rate=rate)
             audio = np.asarray(pcm.samples)
         else:
-            prompt = english_reference(line, bank, animated, understated=bool(pause and not animated))
+            prompt = directed_prompt
+            if prompt is None:
+                prompt = english_reference(line, bank, animated, understated=bool(pause and not animated))
             audio = model.generate(line, voice=prompt, frames_after_eos=7)
         if not audio.size or not np.isfinite(audio).all() or np.max(np.abs(audio)) < 0.001:
             raise ValueError("Invalid synthesized phrase")
@@ -320,7 +393,7 @@ def italian_beats(text):
         yield text[start:].strip()
 
 
-def render_italian(model, text, bank):
+def render_italian(model, text, bank, pause_seconds=None):
     import numpy as np
 
     beats = []
@@ -360,28 +433,25 @@ def render_italian(model, text, bank):
         parts.append(audio)
         if i + 1 < len(beats):
             gap = .34 if style == "question" or line.endswith(("…", "...")) else .19
+            if pause_seconds is not None:
+                gap = pause_seconds
             parts.append(np.zeros(round(rate * gap), dtype=np.float32))
     return np.concatenate(parts)
 
 
-def lapland_audio(path: Path, text: str, language: str, rate: int) -> None:
+def lapland_audio(path: Path, text: str, language: str, rate: int, emotion=None) -> None:
+    if play_original_line(path, text, language, rate):
+        return
+    audio, sample_rate = synthesize_pocket(text, language, emotion)
+    write_voice_wav(path, audio, sample_rate, rate)
+
+
+def synthesize_pocket(text, language, emotion, pause_seconds=None):
     import numpy as np
 
     root = Path(__file__).resolve().parents[1]
     runtime = root / "models" / "pocket-tts"
     voices = root / "assets" / "lapland" / "voice"
-    if language == "en":
-        clip = original_recording(text, voices, runtime / "corpus" / "en")
-        if clip is not None:
-            if not rate:
-                shutil.copyfile(clip, path)
-            else:
-                import miniaudio
-
-                pcm = miniaudio.decode(clip.read_bytes(), output_format=miniaudio.SampleFormat.FLOAT32,
-                                       nchannels=1, sample_rate=44100)
-                write_voice_wav(path, np.asarray(pcm.samples), pcm.sample_rate, rate)
-            return
     bundle = {"en": "english_2026-04", "it": "italian"}[language]
     sys.path.insert(0, str(runtime))
     from pocket_tts_onnx import PocketTTSOnnx
@@ -401,10 +471,20 @@ def lapland_audio(path: Path, text: str, language: str, rate: int) -> None:
     expressive = voices / f"expressive-{language}.npz"
     if expressive.is_file():
         with np.load(expressive, allow_pickle=False) as profile:
+            directed = None
+            if emotion in ("LAZY", "MOCKING", "MANIC", "WHISPER", "NEUTRAL"):
+                reference = voices / "emotions" / language / (emotion + ".wav")
+                if reference.is_file():
+                    import miniaudio
+                    pcm = miniaudio.decode(reference.read_bytes(), output_format=miniaudio.SampleFormat.FLOAT32,
+                                           nchannels=1, sample_rate=model.sample_rate)
+                    encoded = model.mimi_encoder.run(None, {"audio": np.asarray(pcm.samples)[None, None]})[0]
+                    directed = encoded.reshape(1, -1, model.conditioning_dim)
             if language == "en" and "lines" in profile:
-                audio = render_english(model, text, profile, voices, runtime / "corpus" / "en")
+                audio = render_english(model, text, profile, voices, runtime / "corpus" / "en", directed)
             elif language == "it" and {"question", "emphatic"} <= set(profile.files):
-                audio = render_italian(model, text, profile)
+                choices = profile if directed is None else dict.fromkeys(("question", "emphatic", "prompt"), directed)
+                audio = render_italian(model, text, choices, pause_seconds)
             else:
                 audio = model.generate(text, voice=profile["prompt"], frames_after_eos=7)
     else:
@@ -412,8 +492,7 @@ def lapland_audio(path: Path, text: str, language: str, rate: int) -> None:
         audio = model.generate(text, voice=prompt, frames_after_eos=7)
     if not audio.size or not np.isfinite(audio).all() or np.max(np.abs(audio)) < 0.001:
         raise ValueError("Empty or invalid synthesized audio")
-    audio = reduce_decoder_tones(audio, model.sample_rate)
-    write_voice_wav(path, audio, model.sample_rate, rate)
+    return reduce_decoder_tones(audio, model.sample_rate), model.sample_rate
 
 
 def write_voice_wav(path, audio, sample_rate, rate):

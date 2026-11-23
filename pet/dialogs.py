@@ -6,11 +6,12 @@ import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 from urllib.parse import urlsplit
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageTk
 
-from . import APP_NAME
 from .hotkeys import parse_hotkey
+from .voice_input import MIC_THRESHOLDS
 
 
 class MemoryDialog(tk.Toplevel):
@@ -23,7 +24,7 @@ class MemoryDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _: close())
         frame = ttk.Frame(self, padding=12)
         frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="保存希望拉普兰德在以后的对话中记住的事项。").pack(anchor="w")
+        ttk.Label(frame, text="保存希望当前角色在以后的对话中记住的事项。").pack(anchor="w")
         listing = tk.Listbox(frame, exportselection=False)
         listing.pack(fill="both", expand=True, pady=8)
         entry = ttk.Entry(frame)
@@ -153,7 +154,7 @@ class CapturePreview(tk.Toplevel):
 class SettingsDialog(tk.Toplevel):
     def __init__(self, root, cfg, save, close):
         super().__init__(root)
-        self.title(f"{APP_NAME} 设置")
+        self.title(f"{root.title()} 设置")
         self.attributes("-topmost", True)
         self.transient(root)
         self.resizable(False, False)
@@ -165,6 +166,7 @@ class SettingsDialog(tk.Toplevel):
         fields = [
             ("model", "视觉模型", cfg["model"]),
             ("speech_language", "回答和朗读语言", "意大利语" if cfg.get("speech_language") == "it" else "英语"),
+            ("mic_threshold", "连续对话收音门槛", cfg.get("mic_threshold", "较高")),
             ("speech_provider", "语音服务", cfg["speech_provider"]),
             ("voice", "系统声音（SAPI）", cfg["voice"]),
             ("neural_voice", "云端英语音色", cfg["neural_voice"]),
@@ -177,9 +179,16 @@ class SettingsDialog(tk.Toplevel):
             ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
             var = self.fields[key] = tk.StringVar(self, value=value)
             if key == "speech_provider":
-                widget = ttk.Combobox(body, textvariable=var, values=("lapland", "sapi", "edge", "azure"), state="readonly")
+                providers = ["lapland", "sapi", "edge", "azure", "api"]
+                if cfg.get("speech_provider") == "piper":
+                    providers.append("piper")
+                if (Path(__file__).resolve().parents[1] / "models/piper-vits-reference/tone.onnx").is_file():
+                    providers.insert(1, "vits")
+                widget = ttk.Combobox(body, textvariable=var, values=providers, state="readonly")
             elif key == "speech_language":
                 widget = ttk.Combobox(body, textvariable=var, values=("英语", "意大利语"), state="readonly")
+            elif key == "mic_threshold":
+                widget = ttk.Combobox(body, textvariable=var, values=tuple(MIC_THRESHOLDS), state="readonly")
             else:
                 widget = ttk.Entry(body, textvariable=var, width=30)
             widget.grid(row=row, column=1, sticky="ew")
@@ -189,7 +198,7 @@ class SettingsDialog(tk.Toplevel):
             var = self.fields[key] = tk.BooleanVar(self, value=cfg[key])
             ttk.Checkbutton(body, text=label, variable=var).grid(row=row, columnspan=2, sticky="w")
             row += 1
-        ttk.Label(body, wraplength=375, text="lapland 使用所选语言的角色录音在本机合成。Edge 和 Azure 会将口播文本发给微软。"
+        ttk.Label(body, wraplength=375, text="vits 和 lapland 分别用 Piper 和 PocketTTS 在本机朗读，按台词情绪选择角色原声。Edge 和 Azure 会将口播文本发给微软。"
                   "Azure 需要 SPEECH_KEY 和 SPEECH_REGION 环境变量。").grid(row=row, columnspan=2, sticky="w", pady=6)
         self.error = ttk.Label(body, foreground="#A12622", wraplength=375)
         self.error.grid(row=row+1, columnspan=2, sticky="w")
@@ -230,7 +239,7 @@ class HistoryDialog(tk.Toplevel):
         super().__init__(root)
         self.store = store
         self.on_delete = on_delete
-        self.title(f"{APP_NAME} · 对话历史")
+        self.title(f"{root.title()} · 对话历史")
         self.transient(root)
         self.attributes("-topmost", True)
         self.protocol("WM_DELETE_WINDOW", close)

@@ -14,10 +14,16 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageOps, ImageTk
 
 from . import APP_NAME
-from .config import APP_DIR, CAPTURE_DIR, DEFAULTS, save_config
+from .config import APP_DIR, CAPTURE_DIR, DEFAULTS, apply_credentials, save_config
+from .connections import ConnectionDialog
+from .characters import POSES, SHARE_KEYS, character
+from .character_dialog import CharacterDialog
+from . import dsh_tasks
+from .dsh_projects import projects
+from .task_dialog import TaskDialog
 from .dialogs import CapturePreview, HistoryDialog, MemoryDialog, SettingsDialog
 from .history import ConversationHistory
 from .hotkeys import HotkeyManager
@@ -31,7 +37,7 @@ from .screen import (
 )
 from .speech import SpeechEngine, wav_duration, subtitle_duration
 from .subtitles import subtitle_pages
-from .voice_input import VoiceInput, VoiceInputError
+from .voice_input import MIC_THRESHOLDS, SpeechGate, VoiceInput, VoiceInputError
 
 log = logging.getLogger("mochi.app")
 
@@ -92,11 +98,14 @@ class MochiApp:
 
     def __init__(self, cfg: dict[str, Any], *, start_hidden: bool = False):
         self.cfg = cfg
+        self.character = character(cfg.get("character_id", "lapland"))
+        self.project_tasks = {}
         self.events: queue.Queue = queue.Queue()
         self.client = DeepSeekClient(cfg)
         self.speech = SpeechEngine(cfg, Path(__file__).with_name("tts_worker.ps1"))
         self.voice_input = VoiceInput()
         self.voice_turn: threading.Event | None = None
+        self.conversation: SpeechGate | None = None
 
         self.request_speech = self.speech
         self.spoken_key = self.client.language
@@ -105,15 +114,8 @@ class MochiApp:
         self.last_answer: dict[str, Any] | None = None
         self.history: list[dict[str, str]] = []
         self.transcript: list[str] = []
-        self.archive = ConversationHistory()
-        self.topic = uuid.uuid4().hex
+        self._load_project_history()
         self.compaction_lock = threading.Lock()
-        if cfg["save_history"]:
-            try:
-                last_topic, self.history, self.transcript = self.archive.recent_context()
-                self.topic = last_topic or self.topic
-            except (OSError, sqlite3.Error):
-                log.warning("Could not resume saved conversation")
         self.pending_question = ""
         self.request_seq = 0
         self.awaiting_answer = False
@@ -141,8 +143,7 @@ class MochiApp:
         self.compact_position = None
         self.panel_active_at = time.monotonic()
         self.root.withdraw()
-        self.root.title(APP_NAME)
-        self.root.iconbitmap(default=str(SPRITES / "pet-Lapland.ico"))
+        self.root.title(self.role_title)
         self.root.overrideredirect(True)
         self.root.resizable(False, False)
         self.root.configure(bg=TRANSPARENT)
@@ -261,16 +262,18 @@ class MochiApp:
             self.root.geometry(f"{self.W}x{self.H}+{x}+{y}")
             self.canvas.itemconfigure(self.tail_id, state="normal")
             self.canvas.itemconfigure(self.talk_window, state="normal")
+            self.canvas.itemconfigure(self.conversation_window, state="normal")
 
     def _close_panel(self):
         self._cancel_voice_input()
         self.stop_speech()
         self._set_input_visible(False)
-        if self.root.focus_get() in (self.entry, self.talk_button):
+        if self.root.focus_get() in (self.entry, self.talk_button, self.conversation_button):
             self.root.focus_set()
         self.panel_open = False
         self.canvas.itemconfigure(self.tail_id, state="hidden")
         self.canvas.itemconfigure(self.talk_window, state="hidden")
+        self.canvas.itemconfigure(self.conversation_window, state="hidden")
         geometry = f"{self.PET_WIDTH}x{self.H}"
         if self.compact_position:
             x, y = self.compact_position
@@ -286,7 +289,7 @@ class MochiApp:
             px, py = self.root.winfo_pointerxy()
             x, y = px - self.root.winfo_rootx(), py - self.root.winfo_rooty()
             reading = self.PET_WIDTH <= x < self.W and 0 <= y < self.H
-            busy = self.awaiting_answer or self.voice_turn or self.speech_stop or self.input_visible
+            busy = self.awaiting_answer or self.conversation or self.voice_turn or self.speech_stop or self.input_visible
             if reading or busy or self.capturing or self.dialog:
                 self.panel_active_at = now
             elif now - self.panel_active_at >= self.PANEL_IDLE_SECONDS:
@@ -295,25 +298,43 @@ class MochiApp:
 
     # ---------- static UI ----------
 
+    @property
+    def role_title(self):
+        return "pet-" + self.character.data["name_en"]
+
+    def _backdrop(self):
+        if self.character.id != "lapland":
+            frame = Image.new("RGBA", (self.W - 184, 407), BUBBLE)
+            background = self.character.folder / "background.png"
+            with Image.open(background if background.is_file() else self.character.sprite("wait")) as img:
+                if background.is_file():
+                    layer = ImageOps.fit(img.convert("RGBA"), frame.size)
+                    frame.alpha_composite(layer)
+                else:
+                    layer = img.convert("RGBA")
+                    layer.thumbnail((320, 390), Image.Resampling.LANCZOS)
+                    frame.alpha_composite(layer, (frame.width - layer.width, frame.height - layer.height))
+            return Image.blend(Image.new("RGBA", frame.size, BUBBLE), frame, .22)
+        with Image.open(SPRITES / "dialog-skin.webp") as skin:
+            extra = self.W - 184 - skin.width
+            backdrop = Image.new("RGBA", (skin.width + extra, skin.height))
+            backdrop.paste(skin.crop((0, 0, 24, skin.height)), (0, 0))
+            shade = skin.crop((24, 0, 78, skin.height))
+            backdrop.paste(shade.resize((shade.width + extra, skin.height), Image.Resampling.BICUBIC), (24, 0))
+            backdrop.paste(skin.crop((78, 0, skin.width, skin.height)), (78 + extra, 0))
+            return backdrop
+
     def _build_bubble(self) -> None:
         c = self.canvas
         right = self.W - 16
         rounded_rect(c, 174, 16, right + 6, 422, 28, fill=BUBBLE_SHADOW, outline="")
         self.tail_id = c.create_polygon(176, 258, 126, 288, 176, 318, fill=BUBBLE, outline="", smooth=True)
         rounded_rect(c, 167, 7, right + 1, 415, 24, fill=BUBBLE_BORDER, outline="")
-        with Image.open(SPRITES / "dialog-skin.webp") as skin:
-            # Extend the dark part of the artwork while preserving the portrait and corners.
-            extra = right - 168 - skin.width
-            backdrop = Image.new("RGBA", (skin.width + extra, skin.height))
-            backdrop.paste(skin.crop((0, 0, 24, skin.height)), (0, 0))
-            shade = skin.crop((24, 0, 78, skin.height))
-            backdrop.paste(shade.resize((shade.width + extra, shade.height), Image.Resampling.BICUBIC), (24, 0))
-            backdrop.paste(skin.crop((78, 0, skin.width, skin.height)), (78 + extra, 0))
-            self.bubble_skin = ImageTk.PhotoImage(backdrop, master=self.root)
-        c.create_image(168, 8, anchor="nw", image=self.bubble_skin)
+        self.bubble_skin = ImageTk.PhotoImage(self._backdrop(), master=self.root)
+        self.skin_item = c.create_image(168, 8, anchor="nw", image=self.bubble_skin)
 
         self.dot_id = c.create_oval(198, 33, 205, 40, fill=TEAL, outline="")
-        c.create_text(215, 36, text=APP_NAME, anchor="w", fill=CREAM, font=("Georgia", -16))
+        self.role_label = c.create_text(215, 36, text=self.role_title, anchor="w", fill=CREAM, font=("Georgia", -16))
         self.status_id = c.create_text(
             320, 36, text="READY", anchor="w", fill=MUTED, font=("Segoe UI Semibold", -11)
         )
@@ -323,11 +344,16 @@ class MochiApp:
         self.talk_button = tk.Button(self.root, text="按住说话", font=("Microsoft YaHei UI", -12),
                                      bg=CONTROL, fg=CREAM, activebackground=TEAL, relief="flat",
                                      bd=0, cursor="hand2", takefocus=False)
-        self.talk_window = c.create_window(right - 198, 35, window=self.talk_button, width=94, height=28,
+        self.talk_window = c.create_window(right - 301, 35, window=self.talk_button, width=94, height=28,
                                            state="hidden")
         self.talk_button.bind("<ButtonPress-1>", self._press_to_talk)
         self.talk_button.bind("<ButtonRelease-1>", self._release_to_talk)
         self.talk_button.bind("<FocusOut>", lambda _: self._cancel_voice_input() if self.state == "listening" else None)
+        self.conversation_button = tk.Button(
+            self.root, text="开始对话", command=self._toggle_conversation, font=("Microsoft YaHei UI", -12),
+            bg=TEAL, fg=BUBBLE, relief="flat", bd=0, cursor="hand2")
+        self.conversation_window = c.create_window(right - 197, 35, window=self.conversation_button,
+                                                    width=94, height=28, state="hidden")
         self.close_id = c.create_text(
             right - 22, 33, text="×", anchor="center", fill=MUTED, font=("Segoe UI", -22)
         )
@@ -395,7 +421,7 @@ class MochiApp:
         self.entry_window_id = c.create_window(
             206, 355, anchor="w", window=self.entry, width=right - 282, height=28
         )
-        self.input_prompt_id = c.create_text(206, 355, anchor="w", text="输入想问拉普兰德的话…",
+        self.input_prompt_id = c.create_text(206, 355, anchor="w", text=self.input_placeholder,
                                              fill=MUTED, font=("Microsoft YaHei UI", -15))
         self.input_shortcut_id = c.create_text(right - 17, 355, anchor="e", text=self._shortcut_text("Ctrl+Alt+Space"),
                                                fill=MUTED, font=("Segoe UI", -12))
@@ -413,16 +439,25 @@ class MochiApp:
         self._placeholder_active = False
         self._set_input_visible(False)
 
-    def _build_pet(self) -> None:
-        c = self.canvas
+    @property
+    def input_placeholder(self):
+        return "输入想问" + self.character.data["name"] + "的话…"
+
+    def _load_poses(self):
         self.poses = {}
-        for pose in ("curious", "ponder", "wait", "impatient", "smile", "victory", "flustered"):
-            with Image.open(SPRITES / f"{pose}.png") as sprite:
+        for pose in POSES:
+            with Image.open(self.character.sprite(pose)) as original:
+                sprite = original.convert("RGBA")
                 sprite.thumbnail((164, 130), Image.Resampling.LANCZOS)
                 # The Windows overlay uses a binary colour key. Low-opacity
                 # pixels would otherwise show up as dark specks on light desktops.
                 sprite.putalpha(sprite.getchannel("A").point(lambda a: 255 if a >= 96 else 0))
                 self.poses[pose] = ImageTk.PhotoImage(sprite, master=self.root)
+        self.root.iconphoto(True, self.poses["wait"])
+
+    def _build_pet(self) -> None:
+        c = self.canvas
+        self._load_poses()
         self.pose = "wait"
         self.pet_sprite = c.create_image(85, 348, anchor="s", image=self.poses[self.pose], tags=("pet",))
         c.tag_bind("pet", "<ButtonPress-1>", self._pet_press)
@@ -453,10 +488,13 @@ class MochiApp:
         menu.add_command(label="Stop speaking", command=self.stop_speech)
         self._mute_index = menu.index("end") + 1
         menu.add_command(label=self._mute_label(), command=self.toggle_mute)
-        menu.add_command(label=self._shortcut_text(f"Hide {APP_NAME}   Ctrl+Alt+H"), command=self._hide_window)
+        menu.add_command(label=self._shortcut_text(f"Hide {self.role_title}   Ctrl+Alt+H"), command=self._hide_window)
         menu.add_command(label="完整讲解记录", command=self.show_transcript)
         menu.add_command(label="对话历史…", command=self.show_history)
         menu.add_command(label="长期记忆…", command=self.show_memories)
+        menu.add_command(label="模型与项目…", command=self.show_connections)
+        menu.add_command(label="交给 DSH 执行…", command=self.show_project_task)
+        menu.add_command(label="角色与迁移…", command=self.show_characters)
         menu.add_command(label="设置…", command=self.show_settings)
         menu.add_separator()
         menu.add_command(label=self._shortcut_text("Quit   Ctrl+Alt+Q"), command=self.quit)
@@ -477,13 +515,114 @@ class MochiApp:
         if not self.dialog and not self.capturing:
             self.dialog = SettingsDialog(self.root, self.cfg, self._save_settings, self._close_dialog)
 
+    def show_connections(self):
+        if not self.dialog and not self.capturing:
+            self._cancel_voice_input()
+            self.dialog = ConnectionDialog(self.root, self.cfg, self._save_settings, self._close_dialog)
+
+    def show_characters(self):
+        if not self.dialog and not self.capturing:
+            self._cancel_voice_input()
+            self.dialog = CharacterDialog(self)
+
+    def role_settings(self, role):
+        if role.id == self.character.id:
+            return {k: self.cfg.get(k, DEFAULTS[k]) for k in SHARE_KEYS}
+        return {**role.data["settings"], **self.cfg.get("character_settings", {}).get(role.id, {})}
+
+    def activate_character(self, role):
+        if role.id == self.character.id:
+            self._close_dialog()
+            return
+        settings = self.role_settings(role)
+        stored = {**self.cfg.get("character_settings", {}), self.character.id: self.role_settings(self.character)}
+        self._save_settings({**settings, "character_id": role.id, "character_settings": stored,
+                             "model_profile": role.data["name"] + " · " + settings["model"]})
+
+    def show_project_task(self):
+        if self.dialog or self.capturing:
+            return
+        project = projects().get(self.cfg.get("dsh_project"))
+        if not project:
+            self.show_connections()
+            if self.dialog:
+                self.dialog.status.configure(text="请先选择并保存 DSH 项目，再打开「交给 DSH 执行」。")
+            return
+        self._cancel_voice_input()
+        scope = (self.character.id, project.id, self.cfg.get("dsh_session", ""))
+        draft = self.input_var.get().strip() if self.input_visible and not self._placeholder_active else ""
+        self.dialog = TaskDialog(self, project, scope, draft, self.character.data["tasks"])
+
+    def start_project_task(self, scope, text):
+        previous = self.project_tasks.get(scope)
+        if previous and previous.status == "执行中":
+            return
+        job = self.project_tasks[scope] = dsh_tasks.Task(text)
+        archive = self.archive if self.cfg["save_history"] else None
+        def run():
+            try:
+                result = dsh_tasks.execute(scope[1], scope[2], job)
+                status = "已停止" if job.stop.is_set() else "已完成"
+            except (ValueError, OSError) as exc:
+                result, status = str(exc), "执行失败"
+            except Exception:
+                result, status = "无法运行 DSH，请检查项目和 CLI。", "执行失败"
+            if archive and status == "已完成":
+                try:
+                    archive.append(uuid.uuid4().hex, "DSH 任务", text + "\n\nDSH 任务\n\n" + result, text)
+                except (OSError, sqlite3.Error):
+                    log.warning("DSH task history unavailable")
+            self.events.put(("dsh_done", scope, job, status, result))
+        threading.Thread(target=run, daemon=False, name="pet-dsh").start()
+
+    def _load_project_history(self):
+        project = self.cfg.get("dsh_project", "")
+        if self.character.id != "lapland":
+            project = self.character.id + ":" + project
+        self.archive = ConversationHistory.for_scope(project, self.cfg.get("dsh_session", ""))
+        self.topic = uuid.uuid4().hex
+        self.history, self.transcript = [], []
+        if self.cfg["save_history"]:
+            try:
+                topic, self.history, self.transcript = self.archive.recent_context()
+                self.topic = topic or self.topic
+            except (OSError, sqlite3.Error):
+                log.warning("Could not resume saved conversation")
+
     def _save_settings(self, values):
-        changed_keys = values["hotkeys"] != self.cfg["hotkeys"]
         cfg = {**self.cfg, **values}
+        changed_keys = cfg["hotkeys"] != self.cfg["hotkeys"]
+        role_changed = cfg.get("character_id") != self.cfg.get("character_id")
+        scope_changed = role_changed or any(cfg.get(k) != self.cfg.get(k) for k in ("dsh_project", "dsh_session"))
+        route_changed = any(cfg.get(k) != self.cfg.get(k) for k in ("model", "api_base", "model_key_env"))
+        if "api_base" in values or "model_key_env" in values:
+            apply_credentials(cfg)
         save_config(cfg)
+        if scope_changed or route_changed:
+            self._cancel_voice_input()
+            self.request_seq += 1
+            self.awaiting_answer = self.stream_started = False
+            if scope_changed or cfg["api_base"] != self.cfg["api_base"]:
+                self.last_image = None
+            self.last_answer = None
         self.stop_speech()
         self.cfg = cfg
+        if role_changed:
+            self.character = character(cfg["character_id"])
+            self.root.title(self.role_title)
+            self.canvas.itemconfigure(self.role_label, text=self.role_title)
+            self.canvas.itemconfigure(self.input_prompt_id, text=self.input_placeholder)
+            self.bubble_skin = ImageTk.PhotoImage(self._backdrop(), master=self.root)
+            self.canvas.itemconfigure(self.skin_item, image=self.bubble_skin)
+            self._load_poses()
+            self.pose = ""
+            self._set_pose("wait")
+            self.hide_input()
         self.client = DeepSeekClient(cfg)
+        if scope_changed:
+            self._load_project_history()
+        if scope_changed or route_changed:
+            self._show_idle()
         self.speech = SpeechEngine(cfg, Path(__file__).with_name("tts_worker.ps1"))
         if changed_keys:
             self.hotkeys.stop()
@@ -494,7 +633,7 @@ class MochiApp:
         self._build_menu()
         self._close_dialog()
         self.canvas.itemconfigure(self.input_shortcut_id, text=self._shortcut_text("Ctrl+Alt+Space"))
-        self._set_hint("Settings saved   ·   Ctrl+Alt+S capture   ·   Ctrl+Alt+Space ask")
+        self._set_hint(f"已切换至 {self.client.model}" if "model_profile" in values else "设置已保存")
 
     def show_history(self):
         if not self.dialog and not self.capturing:
@@ -600,10 +739,10 @@ class MochiApp:
     def _show_idle(self) -> None:
         self.state = "idle"
         self._set_status("READY", TEAL)
-        self._set_headline("Hi, I'm Lapland.", "你好，我是拉普兰德。")
+        self._set_headline(f"Hi, I'm {self.character.data['name_en']}.", f"你好，我是{self.character.data['name']}。")
         self._show_content(
-            "Hold to talk, or select part of your screen.",
-            "按住说话，或框选屏幕让我讲解。",
+            "Click to start a conversation, or select part of your screen.",
+            "点「开始对话」就能直接说话，也可以框选屏幕让我讲解。",
         )
         self._set_hint("Ctrl+Alt+S 框选   ·   右键查看对话历史")
         self._set_counter("")
@@ -619,15 +758,17 @@ class MochiApp:
             self._set_text(item, text)
 
     def _show_missing_key(self) -> None:
+        if self.client.available:
+            return
         self.state = "error"
         self._set_pose("flustered")
         self._set_status("NO KEY", CORAL)
         self._set_headline("I need a key.", "我还差一把钥匙。")
         self._show_content(
-            "Set DEEPSEEK_API_KEY, or sign in to DSH so I can borrow its DeepSeek key.",
-            "请设置 DEEPSEEK_API_KEY，或登录 DSH，让我复用它的 DeepSeek 密钥。",
+            "Choose a model connection or configure its API key.",
+            f"请设置 {self.client.key_env}，或在「模型与项目」切换服务。",
         )
-        self._set_hint("Right-click → Quit   ·   then set the key and start me again")
+        self._set_hint("右键 → 模型与项目")
         self._set_counter("")
 
     def _show_thinking(self, follow_up: bool, has_image: bool) -> None:
@@ -665,6 +806,46 @@ class MochiApp:
 
     # ---------- input ----------
 
+    def _toggle_conversation(self):
+        if self.conversation is not None:
+            self._cancel_voice_input()
+            return
+        if self.hidden or self.capturing or self.dialog or self.closing:
+            return
+        if not self.client.available:
+            self._show_missing_key()
+            return
+        self._cancel_voice_input()
+        self.hide_input()
+        self.stop_speech()
+        self.request_seq += 1
+        self.awaiting_answer = self.stream_started = False
+        level = MIC_THRESHOLDS.get(self.cfg.get("mic_threshold"), MIC_THRESHOLDS["较高"])
+        try:
+            gate = SpeechGate(level)
+            def collect(samples):
+                utterance = gate.feed(samples)
+                if utterance is not None:
+                    self.events.put(("utterance", gate, utterance))
+            self.voice_input.start(collect)
+        except (VoiceInputError, ImportError) as exc:
+            self._show_error("Microphone unavailable", str(exc))
+            return
+        self.conversation = gate
+        self.conversation_button.configure(text="结束对话", bg=CORAL)
+        self.state = "idle"
+        self._set_status("LISTENING", TEAL)
+        self._set_hint("麦克风已开启 · 直接说话，停顿后自动发送 · Esc 结束")
+
+    def _resume_conversation(self):
+        if (self.conversation is None or self.voice_turn or self.awaiting_answer
+                or self.speech_stop or self.closing):
+            return
+        self.conversation.resume(skip_ms=320)  # Ignore the loudspeaker tail after playback.
+        self.state = "idle"
+        self._set_status("LISTENING", TEAL)
+        self._set_hint("麦克风已开启 · 可以继续说话 · Esc 结束")
+
     def _press_to_talk(self, _event=None):
         if self.hidden or self.capturing or self.dialog or self.closing or self.state == "listening":
             return "break"
@@ -698,6 +879,10 @@ class MochiApp:
         self.state = "transcribing"
         self.talk_button.grab_release()
         self.talk_button.configure(text="按住说话", bg=CONTROL)
+        self._transcribe_voice(samples, token)
+        return "break"
+
+    def _transcribe_voice(self, samples, token):
         self._set_status("TRANSCRIBING", GOLD)
         self._set_hint("正在本机识别 · Esc 取消")
         def decode():
@@ -705,40 +890,49 @@ class MochiApp:
                 text = self.voice_input.transcribe(samples, token)
             except Exception:
                 log.exception("voice transcription failed")
-                self.events.put(("voice_input", token, "", "本机语音识别失败，请检查识别模型或重新按住说话。"))
+                self.events.put(("voice_input", token, "", "本机语音识别失败，请检查识别模型后重试。"))
             else:
                 self.events.put(("voice_input", token, text, ""))
         threading.Thread(target=decode, daemon=True, name="lapland-transcribe").start()
-        return "break"
 
     def _cancel_voice_input(self):
-        if self.voice_turn is None:
+        continuous = self.conversation is not None
+        if not continuous and self.voice_turn is None:
             return
-        self.voice_turn.set()
+        if self.voice_turn is not None:
+            self.voice_turn.set()
         self.voice_turn = None
-        if self.state == "listening":
+        if continuous:
+            self.conversation = None
+            self.voice_input.finish()
+            self.conversation_button.configure(text="开始对话", bg=TEAL)
+        elif self.state == "listening":
             self.voice_input.finish()
             self.talk_button.grab_release()
         self.talk_button.configure(text="按住说话", bg=CONTROL)
-        self.state = "idle"
-        self._set_status("READY", TEAL)
-        self._set_hint("已取消语音输入")
+        if self.state in ("idle", "listening", "transcribing"):
+            self.state = "idle"
+            self._set_status("READY", TEAL)
+        self._set_hint("麦克风已关闭" if continuous else "已取消语音输入")
 
     def _voice_result(self, token, text, error):
         if token is not self.voice_turn or token.is_set() or self.closing:
             return
         self.voice_turn = None
         if error:
+            self._cancel_voice_input()
             self._show_error("Voice input unavailable", error)
         elif not text:
             self.state = "idle"
             self._set_status("READY", TEAL)
             self._set_hint("没听清。请按住说话，说完再松开。")
+            self._resume_conversation()
         else:
-            self._start_ask(self.last_image, text, follow_up=self.last_image is not None)
+            self._start_ask(self.last_image, text, follow_up=self.last_image is not None,
+                            from_conversation=self.conversation is not None)
             if self.awaiting_answer:
                 self._show_content("", "你说：" + text)
-                self._set_hint("正在等拉普兰德回答")
+                self._set_hint(f"正在等{self.character.data['name']}回答")
 
     def _set_input_visible(self, visible: bool) -> None:
         state = "normal" if visible else "hidden"
@@ -766,7 +960,7 @@ class MochiApp:
             return
         self._placeholder_active = True
         self.entry.configure(fg=MUTED)
-        self.entry.insert(0, "输入想问拉普兰德的话…")
+        self.entry.insert(0, self.input_placeholder)
 
     def _entry_clear_placeholder(self) -> None:
         if self._placeholder_active:
@@ -831,8 +1025,8 @@ class MochiApp:
         self._set_counter("")
 
     def hide_input(self) -> None:
-        self._cancel_voice_input()
         if self.input_visible:
+            self._cancel_voice_input()
             log.info("hide input")
             if self.state == "idle":
                 self._set_pose("wait")
@@ -960,9 +1154,10 @@ class MochiApp:
 
     # ---------- model ----------
 
-    def _start_ask(self, image, question: str, follow_up: bool) -> None:
+    def _start_ask(self, image, question: str, follow_up: bool, *, from_conversation=False) -> None:
         self._open_panel()
-        self._cancel_voice_input()
+        if not from_conversation:
+            self._cancel_voice_input()
         self.request_seq += 1
         seq = self.request_seq
         self.pending_question = question
@@ -975,6 +1170,7 @@ class MochiApp:
                 self.archive.remember(note)
             except (OSError, ValueError, sqlite3.Error):
                 self._show_error("Memory unavailable", "这条记忆没能保存，请检查本地数据目录。")
+                self._resume_conversation()
                 return
             self.awaiting_answer = False
             acknowledgement = "Me lo ricorderò." if self.spoken_key == "it" else "I'll remember that."
@@ -1069,7 +1265,7 @@ class MochiApp:
                 self._set_hint("本轮未能保存，可从「完整讲解记录」复制")
             else:
                 if self.compaction_lock.acquire(blocking=False):
-                    threading.Thread(target=self._compact_history, args=(self.client,), daemon=True,
+                    threading.Thread(target=self._compact_history, args=(self.client, self.archive), daemon=True,
                                      name="lapland-memory").start()
                 if isinstance(self.dialog, HistoryDialog):
                     self.dialog.refresh()
@@ -1086,21 +1282,23 @@ class MochiApp:
             self._set_status("READY", TEAL)
             self._show_content(answer["segments"][0][self.spoken_key], answer["segments"][0]["zh"])
             self._set_hint("Ctrl+Alt+Space to ask a follow-up")
+        if self.segment_queue is None:
+            self._resume_conversation()
 
-    def _compact_history(self, client):
+    def _compact_history(self, client, archive):
         try:
-            while self.cfg["save_history"] and not self.closing:
-                pending = self.archive.summary_batch()
+            while self.cfg["save_history"] and not self.closing and self.archive is archive and self.client is client:
+                pending = archive.summary_batch()
                 if not pending:
                     break
                 revision, cursor, summary, rows = pending
                 text = "\n\n".join(part for _, part in rows)
                 # Oversized individual turns are processed completely before advancing the cursor.
                 for offset in range(0, len(text), 8000):
-                    if self.closing or not self.cfg["save_history"]:
+                    if self.closing or not self.cfg["save_history"] or self.archive is not archive or self.client is not client:
                         return
                     summary = client.summarize(summary, text[offset:offset + 8000])
-                if not self.archive.commit_summary(revision, cursor, rows[-1][0], summary):
+                if not archive.commit_summary(revision, cursor, rows[-1][0], summary):
                     break
         except Exception as exc:
             log.warning("Summary deferred (%s)", type(exc).__name__)
@@ -1119,7 +1317,8 @@ class MochiApp:
             index, segment = item
             path = None
             try:
-                path, used = speech.prepare_segment(segment[speech.language], stop_event, provider)
+                direction = {"emotion": segment["emotion"]} if segment.get("emotion") else {}
+                path, used = speech.prepare_segment(segment[speech.language], stop_event, provider, **direction)
                 if used == "sapi":
                     provider = "sapi"
                 duration = wav_duration(path) if path else subtitle_duration(segment[speech.language])
@@ -1169,6 +1368,7 @@ class MochiApp:
         self._set_status("READY", TEAL)
         self._set_hint("Ctrl+Alt+S 框选   ·   右键查看对话历史")
         self._set_counter("")
+        self._resume_conversation()
 
     def stop_speech(self) -> None:
         self._cancel_page_timer()
@@ -1184,6 +1384,7 @@ class MochiApp:
             self._set_status("READY", TEAL)
             self._set_hint("Ctrl+Alt+Space to ask a follow-up   ·   Ctrl+Alt+S for a new region")
             self._set_counter("")
+            self._resume_conversation()
 
     def toggle_mute(self) -> None:
         self.stop_speech()
@@ -1219,7 +1420,23 @@ class MochiApp:
 
     def _handle_event(self, event: tuple) -> None:
         kind = event[0]
-        if kind == "voice_input":
+        if kind == "task_dictation":
+            if self.dialog is event[1]:
+                self.dialog.decoded(event[2], event[3])
+        elif kind == "dsh_done":
+            _, scope, job, status, result = event
+            job.status, job.output = status, result
+            if isinstance(self.dialog, TaskDialog) and self.dialog.scope == scope:
+                self.dialog.refresh()
+            elif scope == (self.character.id, self.cfg.get("dsh_project"), self.cfg.get("dsh_session", "")):
+                self._set_hint(f"DSH 任务{job.status} · 右键查看结果")
+        elif kind == "utterance":
+            _, gate, samples = event
+            if gate is self.conversation and self.voice_turn is None and not self.closing:
+                self.voice_turn = threading.Event()
+                self.state = "transcribing"
+                self._transcribe_voice(samples, self.voice_turn)
+        elif kind == "voice_input":
             self._voice_result(*event[1:])
         elif kind == "hotkey":
             self._on_hotkey(event[1])
@@ -1237,6 +1454,7 @@ class MochiApp:
                 self.awaiting_answer = False
                 self.stop_speech()
                 self._show_error(event[2], event[3])
+                self._resume_conversation()
         elif kind == "segment":
             self._on_segment(*event[1:])
         elif kind == "speech_done":
@@ -1254,7 +1472,7 @@ class MochiApp:
             self.quit()
 
     def _on_escape(self, _event=None) -> None:
-        if self.voice_turn is not None:
+        if self.voice_turn is not None or self.conversation is not None:
             self._cancel_voice_input()
         elif self.input_visible:
             self.hide_input()
@@ -1330,6 +1548,10 @@ class MochiApp:
         if self.closing:
             return
         self.closing = True
+        for job in self.project_tasks.values():
+            job.stop.set()
+        if isinstance(self.dialog, TaskDialog):
+            self._close_dialog()
         self._cancel_voice_input()
         try:
             if self.selector:

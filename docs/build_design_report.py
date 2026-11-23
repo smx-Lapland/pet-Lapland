@@ -11,7 +11,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-ROOT = Path(r"E:\Mochi")
+ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
 OUT = ROOT / "docs" / "Mochi-Design-Report-v0.1.docx"
 
@@ -442,7 +442,7 @@ def setup_header_footer():
     footer = section.footer
     fp = footer.paragraphs[0]
     fp.paragraph_format.tab_stops.add_tab_stop(Cm(17.0), alignment=2)
-    left = fp.add_run("E:\\Mochi  ·  2026-11-22")
+    left = fp.add_run("pet-Lapland  ·  2026-11-22")
     set_run_font(left, DOC_FONT, 8, False, MUTED)
     fp.add_run("\t")
     r = fp.add_run("第 ")
@@ -510,7 +510,7 @@ def cover():
     set_table_borders(meta, BORDER, 4)
     values = [
         ("文档版本", "v0.1  /  MVP", "日期", "2026-11-22"),
-        ("状态", "设计已验证，待评审", "项目位置", "E:\\Mochi"),
+        ("状态", "设计已验证，待评审", "项目位置", "pet-Lapland"),
         ("接入模型", "deepseek-flash", "模型能力", "DeepSeek-V4.1-Flash（text+image）"),
         ("报告范围", "产品 / 交互 / 技术 / 风险", "运行平台", "Windows 10/11"),
     ]
@@ -581,7 +581,7 @@ def toc():
         "阅读提示",
         [
             "本报告基于 2026-11-22 的调研与实测；数字来自本机 2560×1600 / 150% DPI 环境。",
-            "文中“MVP”指 E:\\Mochi 中可运行的 Python 版本，不是概念稿。",
+            "文中“MVP”指 pet-Lapland 中可运行的 Python 版本，不是概念稿。",
             "竞品信息来自项目 README、DSH 插件索引页和公开搜索摘要；未逐一安装所有竞品。",
         ],
         fill=LIGHT,
@@ -1632,7 +1632,7 @@ constraints:
 
     H2("附录 C  文件结构")
     CODE(
-        '''E:\\Mochi
+        '''pet-Lapland
 ├── pet\\
 │   ├── main.py            # 入口、日志、DPI
 │   ├── app.py             # 透明窗、气泡、状态机、动画

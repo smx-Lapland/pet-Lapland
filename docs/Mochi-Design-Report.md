@@ -1,7 +1,7 @@
 # Mochi · 会看屏幕的桌宠
 ## 详细设计报告（Markdown 交付版）
 
-> **项目区**：`E:\Mochi`  
+> **项目区**：`pet-Lapland`
 > **版本**：v0.1 / MVP  
 > **日期**：2026-11-22  
 > **状态**：设计已验证，开发已暂停，等待评审  
@@ -39,13 +39,13 @@
 
 | 文件 | 说明 |
 |---|---|
-| `E:\Mochi\pet\` | 可运行的 Python/Tkinter MVP |
-| `E:\Mochi\run_pet.cmd` | 双击启动 |
-| `E:\Mochi\README.md` | 使用说明、隐私说明、故障排查 |
-| `E:\Mochi\DESIGN.md` | 设计评估精简版 |
-| `E:\Mochi\docs\Mochi-Design-Report.md` | 本文件 |
-| `E:\Mochi\docs\Mochi-Design-Report-v0.1.docx` | 排版版详细报告（31 页） |
-| `E:\Mochi\assets\` | 演示截图、架构图、状态机 |
+| `.\pet\` | 可运行的 Python/Tkinter MVP |
+| `.\run_pet.cmd` | 双击启动 |
+| `.\README.md` | 使用说明、隐私说明、故障排查 |
+| `.\DESIGN.md` | 设计评估精简版 |
+| `.\docs\Mochi-Design-Report.md` | 本文件 |
+| `.\docs\Mochi-Design-Report-v0.1.docx` | 排版版详细报告（31 页） |
+| `.\assets\` | 演示截图、架构图、状态机 |
 
 > 说明：接到“暂停开发、先出设计报告”的要求后，未继续增加功能；当前 MVP 保持可运行状态。
 
@@ -721,7 +721,7 @@ Mochi 的价值不在“又做了一个桌宠”，而在把“屏幕选区”�
 ## 附录 C：文件结构
 
 ```text
-E:\Mochi
+pet-Lapland
 ├── pet\
 │   ├── main.py            # 入口、日志、DPI
 │   ├── app.py             # 透明窗、气泡、状态机、动画
@@ -755,4 +755,4 @@ E:\Mochi
 ---
 
 **文档状态**：交付版 · 待评审  
-**维护位置**：`E:\Mochi\docs\Mochi-Design-Report.md`
+**维护位置**：`.\docs\Mochi-Design-Report.md`

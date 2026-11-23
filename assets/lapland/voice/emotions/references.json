@@ -1,0 +1,174 @@
+[
+  {
+    "language": "en",
+    "emotion": "NEUTRAL",
+    "source": "1.wav",
+    "original_transcript": "If someone's out for revenge on you, don't hesitate, just take them out. Once you decide to pick up a weapon, you don't need a reason to kill.",
+    "start": 0,
+    "seconds": 6.665,
+    "f0_10_50_90_hz": [
+      176,
+      294,
+      539
+    ],
+    "internal_pauses_ms": [
+      150,
+      319,
+      150,
+      519
+    ]
+  },
+  {
+    "language": "en",
+    "emotion": "LAZY",
+    "source": "行动开始.wav",
+    "original_transcript": "We're fighting you guys? Then please do your bestest job, or I'll be really bored.",
+    "start": 0,
+    "seconds": 6.45,
+    "f0_10_50_90_hz": [
+      197,
+      275,
+      388
+    ],
+    "internal_pauses_ms": [
+      379,
+      110,
+      239,
+      150
+    ]
+  },
+  {
+    "language": "en",
+    "emotion": "MOCKING",
+    "source": "观看作战记录.wav",
+    "original_transcript": "Don't you just love how I keep getting more and more powerful?",
+    "start": 0,
+    "seconds": 4.395,
+    "f0_10_50_90_hz": [
+      231,
+      290,
+      382
+    ],
+    "internal_pauses_ms": [
+      279
+    ]
+  },
+  {
+    "language": "en",
+    "emotion": "MANIC",
+    "source": "行动失败.wav",
+    "original_transcript": "Bravo! Now I want to crush them that much harder! Hahaha!",
+    "start": 0,
+    "seconds": 5.245,
+    "f0_10_50_90_hz": [
+      259,
+      393,
+      557
+    ],
+    "internal_pauses_ms": [
+      479
+    ]
+  },
+  {
+    "language": "en",
+    "emotion": "WHISPER",
+    "source": "闲置.wav",
+    "original_transcript": "Sleep tight... enjoy your sweet dreams while you still can.",
+    "start": 0,
+    "seconds": 4.73,
+    "f0_10_50_90_hz": [
+      135,
+      176,
+      289
+    ],
+    "internal_pauses_ms": [
+      718
+    ]
+  },
+  {
+    "language": "it",
+    "emotion": "NEUTRAL",
+    "source": "1.wav",
+    "original_transcript": "Se qualcuno vuole vendicarsi, non esitare, fallo fuori. Quando decidi di usare un'arma, non ti serve un motivo per uccidere.",
+    "start": 0,
+    "seconds": 4.989,
+    "f0_10_50_90_hz": [
+      154,
+      229,
+      333
+    ],
+    "internal_pauses_ms": [
+      319,
+      229
+    ]
+  },
+  {
+    "language": "it",
+    "emotion": "LAZY",
+    "source": "完成高难行动.wav",
+    "original_transcript": "È già finita? Che noia.",
+    "start": 0,
+    "seconds": 3.506,
+    "f0_10_50_90_hz": [
+      177,
+      266,
+      406
+    ],
+    "internal_pauses_ms": [
+      948
+    ]
+  },
+  {
+    "language": "it",
+    "emotion": "MOCKING",
+    "source": "观看作战记录.wav",
+    "original_transcript": "Non è stupendo come continui a diventare sempre più potente?",
+    "start": 0,
+    "seconds": 4.162,
+    "f0_10_50_90_hz": [
+      253,
+      318,
+      382
+    ],
+    "internal_pauses_ms": []
+  },
+  {
+    "language": "it",
+    "emotion": "MANIC",
+    "source": "3星结束行动.wav",
+    "original_transcript": "Li ho fatti a fettine come una millefoglie. Come ti è sembrata?",
+    "start": 0,
+    "seconds": 6.261,
+    "f0_10_50_90_hz": [
+      207,
+      359,
+      464
+    ],
+    "internal_pauses_ms": [
+      130,
+      180,
+      100,
+      509
+    ]
+  },
+  {
+    "language": "it",
+    "emotion": "WHISPER",
+    "source": "信赖提升后交谈1.wav",
+    "original_transcript": "Texas mi teme, ma non voglio farle niente, tranne forse provare a farla rinsavire. È diventata un gattino impaurito.",
+    "start": 0,
+    "seconds": 6.884,
+    "f0_10_50_90_hz": [
+      179,
+      248,
+      363
+    ],
+    "internal_pauses_ms": [
+      289,
+      100,
+      259,
+      549,
+      110
+    ]
+  }
+]

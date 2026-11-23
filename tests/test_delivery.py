@@ -16,7 +16,7 @@ from pet.app import MochiApp
 from pet.config import DEFAULTS
 from pet.dialogs import CapturePreview
 from pet.history import ConversationHistory
-from pet.llm import DeepSeekClient, LLMError
+from pet.llm import DeepSeekClient, LLMError, first_complete_segment, normalize_answer
 from pet.neural_worker import azure_audio, english_beats, italian_beats, original_recording, render_italian
 from pet.screen import set_dpi_awareness
 
@@ -27,6 +27,19 @@ ANSWER = {"headline_en": "Test card", "headline_zh": "测试卡",
 
 
 class StreamTest(unittest.TestCase):
+    def test_direction_is_inherited_without_becoming_speech_or_subtitles(self):
+        rows = [{"en": "[MOCKING] [chuckles] Bravo, Dr. Grey. 12%!", "zh": "[MOCKING] 好，12%！"},
+                {"en": "[MANIC] (whispers) Try again~.", "zh": "再试试。"}]
+        first = first_complete_segment('{"segments":[' + json.dumps(rows[0]) + ',')
+        result = normalize_answer({"segments": rows})
+        self.assertEqual(first["segments"], result["segments"][:1])
+        self.assertEqual(result["segments"], [
+            {"en": "Bravo, Doctor Grey. twelve percent!", "zh": "好，12%！", "emotion": "MOCKING"},
+            {"en": "Try again.", "zh": "再试试。", "emotion": "MOCKING"}])
+        self.assertEqual(normalize_answer({"answer": "[UNKNOWN] Try it."})["segments"][0]["en"], "Try it.")
+        line = normalize_answer({"segments": [{"it": "[WHISPER] Vieni qui.", "zh": "过来。"}]}, "it")
+        self.assertEqual(line["segments"][0], {"it": "Vieni qui.", "zh": "过来。", "emotion": "WHISPER"})
+
     def lines(self, pieces):
         for piece in pieces:
             chunk = {"choices": [{"delta": {"content": piece}}]}
@@ -50,10 +63,10 @@ class StreamTest(unittest.TestCase):
     def test_stream_break_after_first_is_not_replayed(self):
         raw = json.dumps(ANSWER)
         lines = self.lines([raw[:raw.index("}, {") + 1]])
-        with patch("urllib.request.urlopen") as post:
+        with patch("pet.llm.open_api") as post:
             response = post.return_value.__enter__.return_value
             response.headers.get_content_type.return_value = "text/event-stream"
-            response.__iter__.side_effect = lambda: lines
+            response.readline.side_effect = lambda _limit: next(lines, b"")
             first = []
             with self.assertRaises(LLMError):
                 DeepSeekClient({"_api_key": "test"}).ask(None, "test", on_first=first.append)
@@ -69,6 +82,43 @@ class StreamTest(unittest.TestCase):
 
 
 class VoiceTest(unittest.TestCase):
+    def test_hands_free_gate_uses_level_preroll_and_silence(self):
+        from array import array
+        from pet.voice_input import SpeechGate, RATE
+
+        # Mark frames as speech to test the independent volume and timing gates.
+        with patch("webrtcvad.Vad") as vad:
+            vad.return_value.is_speech.return_value = True
+            gate = SpeechGate(-30)
+            quiet = array("h", [0]) * RATE
+            voice = array("h", [6500]) * (RATE // 3)
+            self.assertIsNone(gate.feed(array("h", [500]) * RATE))
+            self.assertIsNone(gate.feed(array("h", [6500]) * 320 + quiet))
+            self.assertIsNone(gate.feed(voice + quiet[:RATE // 3]))
+            self.assertIsNone(gate.feed(voice))
+            turn = gate.feed(quiet)
+            self.assertIsNotNone(turn)
+            self.assertEqual(turn.count(6500), len(voice) * 2)
+            self.assertIsNone(gate.feed(voice + quiet))
+            gate.resume(skip_ms=320)
+            self.assertIsNone(gate.feed(voice[:RATE // 4] + quiet))
+            self.assertIsNotNone(gate.feed(voice + quiet))
+
+    def test_reference_pauses_exclude_the_silence_around_a_take(self):
+        import numpy as np
+        from pet.vits_voice import RATE, reference_pause
+
+        speech = np.ones(RATE // 2, dtype=np.float32) * .2
+        take = np.concatenate((np.zeros(RATE), speech, np.zeros(round(.71 * RATE)), speech, np.zeros(RATE)))
+        self.assertAlmostEqual(reference_pause(take), .71, delta=.02)
+
+    def test_italian_retry_counts_words_without_penalizing_accents(self):
+        from pet.vits_voice import words, word_errors
+
+        expected = words("È lì, Dottore. L’hai vista?")
+        self.assertEqual(word_errors(expected, words("E li Dottore, l'hai vista!")), 0)
+        self.assertEqual(word_errors(expected, words("E li l'hai")), 2)
+
     def test_italian_delivery_keeps_short_pickups_and_selects_separate_references(self):
         import numpy as np
         from unittest.mock import Mock
@@ -104,7 +154,7 @@ class VoiceTest(unittest.TestCase):
             self.assertIsNone(original_recording("What's your plan?", folder, folder))
 
     def test_azure_request_and_ssml_escaping(self):
-        with patch.dict(os.environ, SPEECH_REGION="eastus", SPEECH_KEY="test"), patch("urllib.request.urlopen") as post:
+        with patch.dict(os.environ, SPEECH_REGION="eastus", SPEECH_KEY="test"), patch("pet.neural_worker.open_api") as post:
             post.return_value.__enter__.return_value.read.return_value = b"audio"
             text = "Compare A & B when X < Y."
             self.assertEqual(azure_audio(text, "en-US-JennyNeural", "+10%"), b"audio")
@@ -158,6 +208,47 @@ class DesktopTest(unittest.TestCase):
                 return
             time.sleep(0.005)
         self.fail("Timed out waiting for desktop state")
+
+    def test_continuous_conversation_rearms_without_reopening_microphone(self):
+        from array import array
+        from pet.voice_input import RATE
+
+        app = self.app
+        quiet = array("h", [0]) * RATE
+        utterance = quiet + array("h", [6500]) * (RATE // 2) + quiet
+        heard = []
+        self.gate.clear()
+        def respond(image, question, **kw):
+            heard.append(question)
+            kw["on_first"]({**ANSWER, "segments": ANSWER["segments"][:1]})
+            self.gate.wait(3)
+            return ANSWER
+
+        app.client.ask = respond
+        with (patch("miniaudio.CaptureDevice") as device, patch("webrtcvad.Vad") as vad,
+              patch.object(app.voice_input, "transcribe", side_effect=["第一句", "第二句"]) as transcribe):
+            vad.return_value.is_speech.return_value = True
+            app._open_panel()
+            app.conversation_button.invoke()
+            send = device.return_value.start.call_args.args[0].send
+            send(utterance)
+            self.until(lambda: app.state == "speaking")
+            send(utterance)  # Simulate the loudspeaker returning the assistant's words.
+            self.assertFalse(app.conversation.armed)
+            self.gate.set()
+            self.until(lambda: app.conversation.armed)
+            send(utterance)
+            self.until(lambda: len(heard) == 2 and app.conversation.armed)
+            self.assertEqual(heard, ["第一句", "第二句"])
+            self.assertEqual(transcribe.call_count, 2)
+            device.assert_called_once()
+            device.return_value.close.assert_not_called()
+            send(utterance)  # Closing before the posted event is handled must discard it.
+            app._on_escape()
+            app._poll_events()
+            self.assertIsNone(app.conversation)
+            self.assertEqual(transcribe.call_count, 2)
+            device.return_value.close.assert_called_once()
 
     def select(self):
         self.app._on_hotkey("capture")
