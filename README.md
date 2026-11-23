@@ -100,7 +100,7 @@ Remove-Item Env:PET_MODEL_KEY
 
 拉普兰德的角色提示词控制措辞、断句和语气。回答首段可标注 `LAZY`、`MOCKING`、`MANIC`、`WHISPER` 或 `NEUTRAL`，合成前会移除标签。音色仍取决于对应语言的声学模型和参考录音。缪尔赛思示例使用 ImageGen 生成的同人立绘和 Windows 系统配音。[拉普兰德情绪参考表](assets/lapland/voice/emotions/references.json) · [缪尔赛思立绘说明](assets/characters/muelsyse/artwork.md)
 
-本地 VITS 在本机运行 Piper 和音色转换，再播放聊天模型生成的台词。英语和意大利语各用自己的模型和参考录音。合成调侃台词时，反问之后会留一点时间，接下来的短句收紧停顿。兴奋台词的语速略快，重读音节更突出。完整匹配原作台词时仍直接播放原录音。
+本地 VITS 在本机运行 Piper 和音色转换，再播放聊天模型生成的台词。英语和意大利语各用自己的模型和参考录音。英配会把句末的称呼连回前半句，例如 “Is that your best trick, Doctor?” 会一口气问完，再停一下接下一句。英配合成时也会收短每段开头和结尾的静音。兴奋台词的语速略快，重读音节更突出。完整匹配原作台词时仍直接播放原录音。
 
 在「设置… → 本地神经语音运算」可以选「GPU 优先（自动回退 CPU）」或「仅 CPU」。前者在装有可选 CUDA 运行库时让 NVIDIA GPU 运行支持的 ONNX 算子，保留 CPU 后端。语调处理和意配的 Whisper 发音复核使用 CPU。显卡运行失败时，桌宠通过独立的 CPU 进程重试同一角色音色。Windows 系统朗读和云端语音仍由所选服务处理。
 

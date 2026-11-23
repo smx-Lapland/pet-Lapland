@@ -127,6 +127,12 @@ class ReferenceVoice:
             emotion = "NEUTRAL"
         reference_pitch, pause = self.reference(emotion)
         duration, stress_db = DELIVERY.get(emotion, DELIVERY["NEUTRAL"])
+        english = self.language == "en"
+        if english:
+            # Piper otherwise gives this final vocative a full clause break.
+            # Leave other comma boundaries and the displayed text alone.
+            text = re.sub(r"(?<=\w),[ \t]+(Doctor)(?=[ \t]*(?:[?!.…]|$))", r" \1", text, flags=re.I)
+            duration *= .89
         cfg = SynthesisConfig(length_scale=duration * 2 ** (-max(-10, min(10, rate)) / 10))
         parts = []
         next_pause = pause
@@ -138,11 +144,15 @@ class ReferenceVoice:
             phrase = follow_contour(converted, reference_pitch) if contour else converted
             if stress_db:
                 phrase = emphasize_syllables(phrase, RATE, stress_db)
+            if english:
+                # Strip the outer padding too: streamed subtitle segments are separate WAVs.
+                phrase = trim_phrase_join(phrase, RATE, True, True)
             if parts:
                 # Remove decoder padding before inserting the actor's measured pause.
-                parts[-1] = trim_phrase_join(parts[-1], RATE, False, True)
+                if not english:
+                    parts[-1] = trim_phrase_join(parts[-1], RATE, False, True)
+                    phrase = trim_phrase_join(phrase, RATE, True, False)
                 parts.append(np.zeros(round(RATE * next_pause), np.float32))
-                phrase = trim_phrase_join(phrase, RATE, True, False)
             parts.append(phrase)
             ending = "".join(chunk.phonemes).rstrip()
             if emotion == "MOCKING":
@@ -152,6 +162,9 @@ class ReferenceVoice:
                 next_pause = max(.12, pause * .65)
             else:
                 next_pause = pause
+            if english:
+                # The trimmed phrases retain breath and consonant margins on both sides.
+                next_pause = float(np.clip(next_pause - .09, .05, .20 if emotion == "MOCKING" else .34))
         if not parts:
             raise ValueError("No speech generated")
         output = np.concatenate(parts)

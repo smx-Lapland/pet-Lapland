@@ -236,6 +236,28 @@ class VoiceTest(unittest.TestCase):
         self.assertEqual([line for line, _ in beats], ["Very subtle, Doctor.", "Nobody noticed,", "but I did."])
         self.assertGreater(beats[1][1], beats[0][1])
 
+    def test_vits_english_links_the_vocative_and_trims_decoder_padding(self):
+        import numpy as np
+        from unittest.mock import Mock
+        from pet.vits_voice import RATE, ReferenceVoice
+
+        voice = Mock(language="en", targets={"MOCKING": None})
+        voice.reference.return_value = ([], .28)
+        voice.convert.side_effect = lambda samples, emotion: samples
+        word = np.pad(np.full(RATE // 4, .4, dtype=np.float32), RATE // 5)
+        voice.piper.synthesize.return_value = [Mock(phonemes=[p], audio_float_array=word) for p in ("?", ".")]
+        line = "Is that your best trick, Doctor? Look, Doctor Bell, a red, blue and gold card."
+        audio = ReferenceVoice.generate(voice, line, "MOCKING", contour=False)
+        spoken, cfg = voice.piper.synthesize.call_args.args
+        self.assertEqual(spoken, "Is that your best trick Doctor? Look, Doctor Bell, a red, blue and gold card.")
+        self.assertLess(cfg.length_scale, 1)
+        active = np.flatnonzero(np.abs(audio) > .01)
+        self.assertLess(active[0] / RATE, .06)
+        self.assertLess((len(audio) - active[-1]) / RATE, .06)
+        gap = np.diff(active).max() / RATE
+        self.assertGreater(gap, .20)
+        self.assertLess(gap, .33)
+
     def test_original_recording_matches_the_whole_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
