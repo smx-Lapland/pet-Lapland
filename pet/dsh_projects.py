@@ -57,10 +57,9 @@ def sessions(project):
         turns = rows.get("turnOutline", {}).get("val", {}).get("turns", [])
         finished = [t for t in turns if isinstance(t, dict) and isinstance(t.get("response"), str)
                     and t["response"].strip()]
-        if finished:
-            title = rows.get("title", {}).get("val") or sid
-            updated = rows.get("sessionListMetadata", {}).get("val", {}).get("lastPromptAt")
-            result.append((updated or identity.get("createdAt") or 0, sid, title, finished))
+        title = rows.get("title", {}).get("val") or sid
+        updated = rows.get("sessionListMetadata", {}).get("val", {}).get("lastPromptAt")
+        result.append((updated or identity.get("createdAt") or 0, sid, title, finished))
     return sorted(result, key=lambda item: item[0], reverse=True)
 
 
@@ -81,7 +80,10 @@ def project_context(project_id, session_id=""):
     title = project.path.name if project.title == str(project.path) else project.title
     info = {"项目": excerpt(title, 160)}
     choices = sessions(project)
-    item = next((row for row in choices if not session_id or row[1] == session_id), None)
+    if session_id:
+        item = next((row for row in choices if row[1] == session_id), None)
+    else:
+        item = next((row for row in choices if row[3]), choices[0] if choices else None)
     if item:
         info["DSH 会话"] = excerpt(str(item[2]), 160)
         info["最近对话摘录"] = [

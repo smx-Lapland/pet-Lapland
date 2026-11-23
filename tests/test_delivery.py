@@ -48,6 +48,17 @@ class StreamTest(unittest.TestCase):
             chunk = {"choices": [{"delta": {"content": piece}}]}
             yield b"data: " + json.dumps(chunk).encode() + b"\n"
 
+    def test_early_voice_requires_one_complete_top_level_spoken_field(self):
+        for lang in ("en", "it"):
+            line = '[MOCKING] Bravo, "Doctor"!'
+            src = json.dumps({"metadata": {lang: "nested"}, lang: line, "zh": "好！"})
+            stop = src.index(', "zh"')
+            self.assertTrue(all(first_complete_segment(src[:i], lang) is None for i in range(stop)))
+            early = first_complete_segment(src[:stop], lang)
+            self.assertTrue(early["voice_ready"])
+            self.assertEqual(early["segments"][0][lang], normalize_answer(json.loads(src), lang)["segments"][0][lang])
+            self.assertEqual(early["segments"][0]["emotion"], "MOCKING")
+
     def test_complete_single_segment_keeps_longer_spoken_explanations(self):
         line = "Carefully compare the measurements. " * 17 + "Now check the final result."
         segment = {"en": line, "zh": "逐项比较测量值，再核对结果。"}
@@ -112,6 +123,23 @@ class VoiceTest(unittest.TestCase):
             self.assertEqual((used, engine.device), ("vits", "cpu"))
             self.assertTrue(path.is_file())
             self.assertEqual(attempts, [("cuda", "vits", "it", "MOCKING"), ("cpu", "vits", "it", "MOCKING")])
+
+    def test_auto_gpu_recovery_reuses_cpu_until_cooldown_expires(self):
+        from pet.speech import SpeechEngine
+        with patch("pet.speech.cuda_installed", return_value=True):
+            engine = SpeechEngine({"speech_provider": "vits", "speech_language": "it"}, Path("unused"))
+        with patch("pet.speech.time.monotonic", return_value=10):
+            engine._use_cpu_fallback()
+        with patch.object(engine, "close_renderer") as close:
+            with patch("pet.speech.time.monotonic", return_value=35):
+                engine._retry_gpu_if_due()
+            self.assertEqual(engine.device, "cpu")
+            close.assert_not_called()
+            with patch("pet.speech.time.monotonic", return_value=41):
+                engine._retry_gpu_if_due()
+            self.assertEqual(engine.device, "cuda")
+            self.assertIsNone(engine.gpu_retry_at)
+            close.assert_called_once()
 
     def test_cpu_setting_and_missing_gpu_keep_cpu_runtime(self):
         from pet.speech import SpeechEngine
@@ -451,15 +479,16 @@ class DesktopTest(unittest.TestCase):
         self.app._show_content(long, short, duration=.5)
         self.app.root.update()
         self.assertEqual(caps.winfo_width(), self.app.subtitle_width)
-        self.assertGreater(caps.overflow[0], caps.viewport)
+        self.assertGreater(caps.overflow[0], caps.line_heights[0])
         self.assertEqual(caps.overflow[1], 0)
-        self.assertLess(caps.bbox(en)[3], caps.bbox(zh)[1])
-        self.until(lambda: 0 < caps.progress < 1)
-        self.assertLess(caps.coords(en)[0], 2)
-        self.assertEqual(caps.coords(zh)[0], 2)
+        original, translation = caps.tracks
+        self.assertLess(original.winfo_y() + original.winfo_height(), translation.winfo_y())
+        self.until(lambda: original.coords(en)[1] < 0 and caps.progress < 1)
+        self.assertEqual(original.coords(en)[0], 2)
+        self.assertEqual(translation.coords(zh), [2, 0])
         self.until(lambda: caps.progress == 1)
-        self.assertLessEqual(caps.bbox(en)[2], caps.viewport)
-        self.assertEqual(caps.itemcget(en, "text"), long.strip())
+        self.assertLessEqual(original.bbox(en)[3], original.winfo_height() + 1)
+        self.assertEqual(original.itemcget(en, "text"), long.strip())
         caps.event_generate("<MouseWheel>", delta=120)
         self.assertLess(caps.progress, 1)
         self.assertIsNone(caps.timer)
@@ -482,7 +511,49 @@ class DesktopTest(unittest.TestCase):
             self.assertEqual(render.call_count, 1)
             self.assertEqual(render.call_args.args[0], " ".join(s["en"] for s in ANSWER["segments"]))
             caps = self.app.captions
-            self.assertEqual(caps.itemcget(caps.rows[1], "text"), "".join(s["zh"] for s in ANSWER["segments"]))
+            self.assertEqual(caps.tracks[1].itemcget(caps.rows[1], "text"), "".join(s["zh"] for s in ANSWER["segments"]))
+
+    def test_first_spoken_field_plays_while_translation_is_pending(self):
+        self.gate.clear()
+        text = "Oh, really? Your move, Doctor."
+        final = normalize_answer({"en": "[MOCKING] " + text, "zh": "当真？轮到你了，博士。"})
+        def reply(_image, _question, **kwargs):
+            early = first_complete_segment(json.dumps({"en": "[MOCKING] " + text})[:-1] + ",")
+            kwargs["on_first"](early)
+            self.gate.wait(3)
+            return final
+        self.app.client.ask = reply
+        with patch.object(self.app.speech, "prepare_segment", return_value=(None, "muted")) as render:
+            self.select().send()
+            self.until(lambda: render.called)
+            self.assertTrue(self.app.awaiting_answer)
+            self.gate.set()
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            render.assert_called_once()
+            self.assertEqual(render.call_args.args[0], text)
+            self.assertEqual(self.app.translated_text, final["segments"][0]["zh"])
+
+    def test_dsh_menu_selects_registered_project_and_displays_its_outline(self):
+        from pet.dsh_projects import Project
+        with tempfile.TemporaryDirectory() as tmp, patch("pet.config.CONFIG_PATH", Path(tmp) / "config.json"), \
+                patch("pet.app.projects", return_value={"p": Project("p", "Fixture", Path(tmp), ())}), \
+                patch("pet.app.project_context", return_value={"项目":"Fixture", "DSH 会话":"DSH fixture",
+                     "最近对话摘录":[{"问题":"From DSH", "回答":"A project answer"}]}) as context:
+            app = self.app
+            app._open_panel()
+            app._list_dsh_projects()
+            self.assertEqual(app.project_menu.entrycget(1, "label"), "Fixture")
+            app.project_menu.invoke(1)
+            self.assertEqual((app.client.project, app.cfg["dsh_session"]), ("p", ""))
+            app.show_dsh_context()
+            context.assert_called_once_with("p", "")
+            self.assertIn("DSH fixture", app.dialog.title())
+            self.assertTrue(any(isinstance(w, tk.Text) and "A project answer" in w.get("1.0","end")
+                                for w in app.dialog.winfo_children()))
+            app._close_dialog()
+            app._list_dsh_projects()
+            app.project_menu.invoke(0)
+            self.assertFalse(app.client.project)
 
     def test_browse_previous_conversation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -540,7 +611,7 @@ class DesktopTest(unittest.TestCase):
             self.app._start_ask(None, "月光从哪来？", False)
             self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
             self.assertEqual(spoken, [answer["segments"][0]["it"]])
-            self.assertEqual(self.app.captions.itemcget(self.app.captions.rows[1], "text"), answer["segments"][0]["zh"])
+            self.assertEqual(self.app.captions.tracks[1].itemcget(self.app.captions.rows[1], "text"), answer["segments"][0]["zh"])
             self.assertIn(spoken[0], self.app.transcript[-1])
 
     def test_gpu_renderer_is_reused_for_input_and_released_on_hide(self):
@@ -573,6 +644,22 @@ class DesktopTest(unittest.TestCase):
             close.assert_called_once()
             self.assertIsNone(app.renderer_timer)
 
+    def test_compact_english_standby_wakes_on_open_and_clears_on_hide(self):
+        app = self.app
+        app.speech.provider, app.speech.muted = "vits", False
+        app.speech.english_bundle = Path("fixture.safetensors")
+        with patch.object(app.speech, "warmup") as warm, patch.object(app.speech, "close_renderer") as close:
+            app._restore_window()
+            warm.assert_called_once_with(standby=True)
+            self.assertIsNotNone(app.standby_timer)
+            app._open_panel()
+            self.assertIsNone(app.standby_timer)
+            self.assertEqual(warm.call_args.args, ())
+            self.assertEqual(warm.call_args.kwargs, {})
+            app._hide_window()
+            self.assertIsNone(app.renderer_timer)
+            close.assert_called_once()
+
     def test_lapland_poses_follow_a_request(self):
         entered = threading.Event()
         release = threading.Event()
@@ -604,7 +691,7 @@ class DesktopTest(unittest.TestCase):
         self.select().send()
         self.until(lambda: self.app.stream_started)
         self.assertTrue(self.app.awaiting_answer)
-        self.assertEqual(self.app.captions.itemcget(self.app.captions.rows[1], "text"), ANSWER["segments"][0]["zh"])
+        self.assertEqual(self.app.captions.tracks[1].itemcget(self.app.captions.rows[1], "text"), ANSWER["segments"][0]["zh"])
         self.app.begin_capture()
         self.assertFalse(self.app.capturing)
         self.app.stop_speech()

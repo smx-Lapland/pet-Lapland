@@ -35,6 +35,37 @@ def installed_voice(character_id):
     return None, None
 
 
+def shape_english_delivery(samples, mood):
+    # Target voiced P10–P90 spans in semitones, measured from the actor's English takes.
+    target = {"MOCKING": 15.9, "MANIC": 15.6, "NEUTRAL": 14., "LAZY": 12.3}.get(mood or "NEUTRAL")
+    if not target:
+        return samples
+    import numpy as np
+    try:
+        import parselmouth
+        from parselmouth.praat import call
+    except ImportError:
+        return samples  # Earlier optional runtimes still support the native trained voice.
+    sound = parselmouth.Sound(samples.astype(float) / 32768, 32000)
+    hz = sound.to_pitch_ac(time_step=.0125, pitch_floor=80, pitch_ceiling=620).selected_array["frequency"]
+    voiced = hz[hz > 0]
+    if voiced.size < 16:
+        return samples
+    low, center, high = np.percentile(voiced, [10, 50, 90])
+    span = 12 * np.log2(high / low)
+    if span < 2 or span >= target - .4:
+        return samples
+    gain = min(.34, target / span - 1)
+    manip = call(sound, "To Manipulation", .0125, 80., 620.)
+    tier = call(manip, "Extract pitch tier")
+    # Preserve the line's own pitch center and stress timing. Cap the shift at two semitones.
+    call(tier, "Formula", f"self * 2 ^ (min(2, max(-2, {gain} * 12 * log2(self / {center}))) / 12)")
+    call([tier, manip], "Replace pitch tier")
+    audio = call(manip, "Get resynthesis (overlap-add)").values[0]
+    peak = np.max(np.abs(audio))
+    return np.rint(audio * (32767 / max(1., peak / .98))).astype("<i2")
+
+
 class EnglishVoice:
     def __init__(self, bundle, device):
         engine = RUNTIME / "engine"
@@ -69,6 +100,14 @@ class EnglishVoice:
         for word, phones in LEXICON.items():
             english._g2p.cmu[word] = [phones.split()]
 
+    def activate(self, device):
+        import torch
+        if device == "cuda" and self.device == "cpu" and torch.cuda.is_available():
+            self.gpt.to("cuda")
+            self.vocoder.to("cuda")
+            self.refs = {name: tuple(t.to("cuda") for t in ref) for name, ref in self.refs.items()}
+            self.device = "cuda"
+
     def render(self, text, mood, rate):
         import torch
         from text import cleaned_text_to_sequence, english
@@ -87,8 +126,8 @@ class EnglishVoice:
         # The upstream scripted layers spend seconds specializing the first utterance.
         with torch.inference_mode(), torch.jit.optimized_execution(False):
             limit = min(25 * 50, max(75, target.size(1) * 5 + 40))
-            seed = 42 if mood == "MANIC" else 19
-            for take in (seed, 42 if seed == 19 else 19):
+            seed = 37 if mood == "MOCKING" else 19
+            for take in (seed, 42):
                 torch.manual_seed(take)
                 tokens, count = self.gpt.infer_panel(full, length, prompt, bert, top_k=15, top_p=.88,
                                                            temperature=.85, early_stop_num=limit)
@@ -100,7 +139,8 @@ class EnglishVoice:
                                         speed=2 ** (max(-10, min(10, rate)) / 10))[0, 0]
             if not torch.isfinite(audio).all() or audio.abs().max() < .001:
                 raise ValueError("Invalid English speech waveform")
-            return (audio / (audio.abs().max() / .95).clamp(min=1) * 32767).short().cpu().numpy()
+            pcm = (audio / (audio.abs().max() / .95).clamp(min=1) * 32767).short().cpu().numpy()
+        return shape_english_delivery(pcm, mood)
 
 
 def main():
@@ -122,9 +162,13 @@ def main():
             wav.writeframes(audio.astype("<i2", copy=False).tobytes())
 
     if sys.argv[1:2] == ["--session"]:
-        voice = EnglishVoice(bundle, os.environ.get("PET_TTS_DEVICE"))
+        target_device = os.environ.get("PET_TTS_DEVICE")
+        voice = EnglishVoice(bundle, "cpu" if "--standby" in sys.argv else target_device)
         for line in sys.stdin.buffer:
             job = json.loads(line)
+            voice.activate(target_device)
+            if job.get("wake"):
+                continue
             target = Path(job["path"])
             pending = Path(str(target) + ".pending")
             write(job, pending)

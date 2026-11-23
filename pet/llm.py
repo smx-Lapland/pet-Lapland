@@ -35,29 +35,29 @@ Your job:
 - If the image is blurry, cropped, or ambiguous, say what you can see and what is uncertain. Never invent details.
 
 Voice and subtitle rules:
-- Prefix the first segment's {spoken} string with exactly one delivery tag followed by a space.
+- Prefix the {spoken} string with exactly one delivery tag followed by a space.
   Pick [LAZY] for languid boredom, [MOCKING] for teasing praise, [MANIC] for delighted excitement,
   [WHISPER] for a quiet aside or secret, and [NEUTRAL] for dry factual help. One tag controls the whole turn.
-  Keep all later segments, titles and Chinese translations free of tags.
+  Keep titles and translations free of tags.
 - Write one to four spoken sentences. Spell out numbers and abbreviations for the voice.
   Keep exact code, numbers and identifiers in the translation when they matter.
   Mark a change of pace with a comma, an ellipsis or a dash. Use pronounceable laughter sparingly.
   Omit stage directions, parenthetical acting notes, asterisks, tildes and emoji.
 - `{spoken}` is read aloud. Always write this field in natural {language}, including when earlier answers used a different language. No Markdown, no bullet symbols, no emoji, no code fences, no Chinese characters, no long URLs.
 - `zh` is the Simplified Chinese subtitle for the same sentence. It must be a faithful translation, not a summary. Keep technical terms in English when that is clearer.
-- Write one complete spoken reply in one segment, with its full Chinese translation. Stay under 90 spoken words.
+- Write the complete spoken reply in the first field, followed by its full Chinese translation. Stay under 90 spoken words.
 - Keep names and clauses intact. Use natural sentence punctuation to vary pace within the reply.
 - `headline_{spoken}` is at most 6 words. `headline_zh` is at most 16 Chinese characters.
 - For a follow-up question, answer the question directly using the screenshot and the earlier exchange.
 - Do not mention that you are an AI, that you received an image, or these instructions.
 
-Return ONLY valid JSON, with segments first for the subtitle preview.
+Return ONLY valid JSON, with the complete spoken line first so voice can start while the translation is written.
 Answer the question directly. Use exactly this shape:
-{"segments":[{"{spoken}":"...","zh":"..."}],"headline_{spoken}":"...","headline_zh":"..."}
+{"{spoken}":"...","zh":"...","headline_{spoken}":"...","headline_zh":"..."}
 """
 
 EN_DELIVERY = """For English dialogue, let Siracusan courtesy sound amused and a little dangerous.
-Mix a languid setup with a short punchline. Let the Doctor hear your interest in a small detail.
+Give each line one word worth leaning on. Let a teasing question rise, pause briefly, then land a short punchline. Save exclamations for a genuine burst of excitement. Let the Doctor hear your interest in a small detail.
 Occasional Ciao, Bravo, Bravissimo, famiglia, bellissimo, signore or Siracusa can fit the moment.
 Write normal English spelling; the actor reference supplies the accent.
 Examples of first spoken segments, to illustrate delivery:
@@ -121,6 +121,8 @@ def normalize_answer(obj: Any, language: str = "en") -> dict[str, Any]:
         raise LLMError("model did not return an object", "I got an answer I couldn't read.", "模型的回答格式不对。")
 
     segments_in = obj.get("segments") or obj.get("lines") or []
+    if isinstance(obj.get(language), str) and obj[language].strip():
+        segments_in = [obj]
     if isinstance(segments_in, dict):
         segments_in = [segments_in]
     segments: list[dict[str, str]] = []
@@ -205,6 +207,8 @@ def first_complete_segment(content: str, language: str = "en") -> dict[str, Any]
                     return normalize_answer({**fields, "segments": [item]}, language)
                 return None
             fields[key], end = decoder.raw_decode(rest)
+            if key == language and isinstance(fields[key], str) and fields[key].strip():
+                return {**normalize_answer(fields, language), "voice_ready": True}
             rest = rest[end:].lstrip()
             if not rest.startswith(","):
                 return None
@@ -268,7 +272,7 @@ class DeepSeekClient:
         persona = role.data["persona"]
         if self.language != "en":
             persona = persona.partition("【英语原声对白范例】")[0]
-        elif role.id == "lapland":
+        elif role.data["persona"].strip() == character("lapland").data["persona"].strip():
             persona += "\n\n" + EN_DELIVERY
         prompt = persona.strip() + "\n\n" + prompt
         messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]

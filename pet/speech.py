@@ -39,6 +39,7 @@ class SpeechEngine:
             self.english_bundle, self.english_python = installed_voice(self.character_id)
         self.device = ("cuda" if cfg.get("voice_device", "auto") == "auto"
                        and self.provider in ("lapland", "vits", "piper") and (self.english_bundle or cuda_installed()) else "cpu")
+        self.gpu_retry_at = None
         self.neural_voice = (cfg.get("neural_voice_it", "it-IT-ElsaNeural") if self.language == "it"
                              else cfg.get("neural_voice", "en-US-JennyNeural"))
         self.rate = int(cfg.get("rate", 0))
@@ -49,6 +50,7 @@ class SpeechEngine:
         self._play_lock = threading.Lock()
         self._renderer_lock = threading.Lock()
         self._renderer = None
+        self._standby = False
 
     def _neural_command(self):
         # Launch the interpreter directly so cancellation also stops native inference.
@@ -71,19 +73,43 @@ class SpeechEngine:
                 env["PATH"] = str(conda_bin) + os.pathsep + env.get("PATH", "")
         return env
 
-    def warmup(self):
+    def _retry_gpu_if_due(self):
+        if self.gpu_retry_at is not None and time.monotonic() >= self.gpu_retry_at:
+            self.close_renderer()
+            self.device = "cuda"
+            self.gpu_retry_at = None
+
+    def _use_cpu_fallback(self):
+        self.device = "cpu"
+        self.gpu_retry_at = time.monotonic() + 30
+
+    def warmup(self, *, standby=False):
         if self.muted or self.provider not in ("sapi", "vits", "lapland"):
             return
+        self._retry_gpu_if_due()
         with self._renderer_lock:
             if self._renderer is not None:
-                return
+                if self._renderer.poll() is None:
+                    if not standby and self._standby:
+                        try:
+                            self._renderer.stdin.write(b'{"wake":true}\n')
+                            self._renderer.stdin.flush()
+                        except OSError:
+                            pass  # A job will observe the exit and use normal recovery.
+                        self._standby = False
+                    return
+                self._renderer.stdin.close()
+                self._renderer = None
             cmd, env = self._sapi_command() + ["-Session"], None
             if self.provider != "sapi":
                 cmd = self._neural_command() + ["--session", self.provider, self.language]
                 env = self._neural_env()
+                if standby and self.english_bundle:
+                    cmd.append("--standby")
             try:
                 self._renderer = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                                                   stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW, env=env)
+                self._standby = standby and bool(self.english_bundle)
             except OSError:
                 log.warning("Could not prestart local voice worker")
 
@@ -150,6 +176,7 @@ class SpeechEngine:
     def prepare_segment(self, text, stop_event, provider, emotion=None):
         if self.muted or stop_event.is_set():
             return None, "muted"
+        self._retry_gpu_if_due()
         path = CACHE_DIR / f"tts_{uuid.uuid4().hex}.wav"
         job = {"path": str(path), "text": sanitize_for_tts(text, self.language), "rate": self.rate,
                "voice": self.voice if provider == "sapi" else self.neural_voice,
@@ -167,7 +194,7 @@ class SpeechEngine:
                 return None, "muted"
             if self.device == "cuda":
                 log.warning("Local GPU worker failed; retrying the same voice on CPU")
-                self.device = "cpu"
+                self._use_cpu_fallback()
                 proc = None
             elif rendered is None:
                 proc = None
@@ -191,7 +218,7 @@ class SpeechEngine:
                 if self.device != "cuda":
                     break
                 log.warning("Local GPU worker failed; retrying the same voice on CPU")
-                self.device = "cpu"
+                self._use_cpu_fallback()
             log.warning("%s voice unavailable, using SAPI", provider)
         paths = self.synthesize([text], stop_event)
         return (paths[0], "sapi") if paths else (None, "unavailable")

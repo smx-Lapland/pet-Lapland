@@ -22,7 +22,7 @@ from .connections import ConnectionDialog
 from .characters import POSES, SHARE_KEYS, character
 from .character_dialog import CharacterDialog
 from . import dsh_tasks
-from .dsh_projects import projects
+from .dsh_projects import project_context, projects
 from .task_dialog import TaskDialog
 from .dialogs import CapturePreview, HistoryDialog, MemoryDialog, SettingsDialog
 from .history import ConversationHistory
@@ -120,11 +120,13 @@ class MochiApp:
         self.request_seq = 0
         self.awaiting_answer = False
         self.stream_started = False
+        self.early_voice = False
         self.answer_voice_token = 0
         self.dialog: tk.Toplevel | None = None
         self.speech_token = 0
         self.speech_stop: threading.Event | None = None
         self.renderer_timer = None
+        self.standby_timer = None
         self.capturing = False
         self.closing = False
         self.hidden = start_hidden
@@ -237,6 +239,24 @@ class MochiApp:
         except Exception:
             pass
         self.hidden = False
+        self._preload_compact_voice()
+
+    def _preload_compact_voice(self):
+        if self.hidden or self.closing or self.panel_open or self.speech.muted or not self.speech.english_bundle:
+            return
+        if self.standby_timer is None:
+            self.speech.warmup(standby=True)
+            self.standby_timer = self.root.after(120000, self._expire_standby)
+
+    def _expire_standby(self):
+        self.standby_timer = None
+        if not self.panel_open:
+            self.speech.close_renderer()
+
+    def _clear_standby_timer(self):
+        if self.standby_timer is not None:
+            self.root.after_cancel(self.standby_timer)
+            self.standby_timer = None
 
     def _hide_window(self) -> None:
         self._close_panel()
@@ -254,6 +274,7 @@ class MochiApp:
     def _open_panel(self):
         self.panel_active_at = time.monotonic()
         if not self.panel_open:
+            self._clear_standby_timer()
             self.panel_open = True
             x, y = self.root.winfo_x(), self.root.winfo_y()
             self.compact_position = (x, y)
@@ -261,6 +282,7 @@ class MochiApp:
             x = max(vx, min(x, vx + vw - self.W))
             self.root.geometry(f"{self.W}x{self.H}+{x}+{y}")
             self.canvas.itemconfigure(self.tail_id, state="normal")
+            self.canvas.itemconfigure(self.project_window, state="normal")
             self.canvas.itemconfigure(self.talk_window, state="normal")
             self.canvas.itemconfigure(self.conversation_window, state="normal")
             self._warm_voice_for_input()
@@ -273,6 +295,7 @@ class MochiApp:
             self.root.focus_set()
         self.panel_open = False
         self.canvas.itemconfigure(self.tail_id, state="hidden")
+        self.canvas.itemconfigure(self.project_window, state="hidden")
         self.canvas.itemconfigure(self.talk_window, state="hidden")
         self.canvas.itemconfigure(self.conversation_window, state="hidden")
         geometry = f"{self.PET_WIDTH}x{self.H}"
@@ -295,6 +318,7 @@ class MochiApp:
                 self.panel_active_at = now
             elif now - self.panel_active_at >= self.PANEL_IDLE_SECONDS:
                 self._close_panel()
+                self._preload_compact_voice()
         self.root.after(1000, self._check_panel)
 
     # ---------- static UI ----------
@@ -379,6 +403,15 @@ class MochiApp:
         c.create_window(self.CONTENT_X, 196, anchor="nw", window=self.captions)
         self.captions.bind("<Button-3>", self._popup_menu)
         c.create_line(self.CONTENT_X, 178, self.CONTENT_X + self.subtitle_width, 178, fill="#645863")
+        self.project_button = tk.Menubutton(c, bg=CONTROL, fg=CREAM, activebackground=TEAL,
+                                          relief="flat", indicatoron=True, anchor="w",
+                                          font=("Microsoft YaHei UI", -13), cursor="hand2")
+        self.project_menu = tk.Menu(self.project_button, tearoff=False, postcommand=self._list_dsh_projects)
+        self.project_button.configure(menu=self.project_menu)
+        self.project_choice = tk.StringVar(self.root)
+        self._project_label()
+        self.project_window = c.create_window(self.CONTENT_X, 298, anchor="w", window=self.project_button,
+                                              width=220, height=28, state="hidden")
         self.hint_id = c.create_text(
             198, 393, text="", anchor="w", fill=MUTED, font=("Microsoft YaHei UI", -12),
         )
@@ -502,6 +535,52 @@ class MochiApp:
         if not self.dialog and not self.capturing:
             self.dialog = SettingsDialog(self.root, self.cfg, self._save_settings, self._close_dialog)
 
+    def _project_label(self):
+        key = self.cfg.get("dsh_project", "")
+        project = projects().get(key) if key else None
+        self.project_choice.set(key)
+        title = project.title if project else ("项目已移除" if key else "独立对话")
+        self.project_button.configure(text="DSH 项目  ·  " + title)
+
+    def _list_dsh_projects(self):
+        menu = self.project_menu
+        menu.delete(0, "end")
+        workspaces = projects()
+        menu.add_radiobutton(label="独立对话", variable=self.project_choice, value="",
+                             command=lambda: self._choose_dsh_project(""))
+        titles = [p.title for p in workspaces.values()]
+        for project in workspaces.values():
+            label = project.title if titles.count(project.title) == 1 else f"{project.title}  ·  {project.path}"
+            menu.add_radiobutton(label=label, variable=self.project_choice, value=project.id,
+                                 command=lambda key=project.id: self._choose_dsh_project(key))
+        menu.add_separator()
+        menu.add_command(label="查看所选 DSH 项目的最近对话…", command=self.show_dsh_context,
+                         state="normal" if self.cfg.get("dsh_project") in workspaces else "disabled")
+        menu.add_command(label="选择具体会话…", command=self.show_connections)
+
+    def _choose_dsh_project(self, key):
+        if key == self.cfg.get("dsh_project", ""):
+            return
+        if key and key not in projects():
+            self._project_label()
+            self._set_hint("该项目已从 DSH 移除，请重新选择。")
+            return
+        self._save_settings({"dsh_project": key, "dsh_session": ""})
+        self._set_hint("使用最近的 DSH 会话 · 右键可交给 DSH 执行" if key else "已切换至独立对话")
+
+    def show_dsh_context(self):
+        if self.dialog or self.capturing or not self.cfg.get("dsh_project"):
+            return
+        try:
+            context = project_context(self.cfg["dsh_project"], self.cfg.get("dsh_session", ""))
+        except ValueError as exc:
+            self._set_hint(str(exc))
+            return
+        title = context.get("DSH 会话") or context["项目"]
+        turns = context.get("最近对话摘录", [])
+        self._text_dialog("DSH 项目对话 · " + title, "\n\n".join(
+            t["问题"] + "\n" + t["回答"] for t in turns) or "这个项目还没有已完成的 DSH 对话。")
+
     def show_connections(self):
         if not self.dialog and not self.capturing:
             self._cancel_voice_input()
@@ -594,6 +673,7 @@ class MochiApp:
             self.last_answer = None
         self.stop_speech()
         self.cfg = cfg
+        self._project_label()
         if role_changed:
             self.character = character(cfg["character_id"])
             self.root.title(self.role_title)
@@ -644,10 +724,14 @@ class MochiApp:
             self.dialog = MemoryDialog(self.root, self.archive, self._close_dialog)
 
     def show_transcript(self):
+        self._text_dialog("当前选区 · 完整讲解记录", "\n\n".join(self.transcript) or
+                          "完成一次讲解后，可在这里查看双语记录。")
+
+    def _text_dialog(self, title, body):
         if self.dialog or self.capturing:
             return
         dlg = self.dialog = tk.Toplevel(self.root)
-        dlg.title("当前选区 · 完整讲解记录")
+        dlg.title(title)
         dlg.transient(self.root)
         dlg.attributes("-topmost", True)
         transcript = tk.Text(dlg, width=68, height=24, wrap="word", padx=12, pady=10)
@@ -655,7 +739,7 @@ class MochiApp:
         transcript.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         transcript.pack(expand=True, fill="both")
-        transcript.insert("end", "\n\n".join(self.transcript) or "完成一次讲解后，可在这里查看双语记录。")
+        transcript.insert("end", body)
         transcript.configure(state="disabled")
         dlg.protocol("WM_DELETE_WINDOW", self._close_dialog)
         dlg.bind("<Escape>", lambda _: self._close_dialog())
@@ -1114,7 +1198,9 @@ class MochiApp:
         seq = self.request_seq
         self.pending_question = question
         self.request_speech = self.speech
+        self.early_voice = False
         self.answer_voice_token = self.speech_token
+        self.sent_at = time.monotonic()
         self.spoken_key = self.client.language
         note = self.archive.requested_note(question)
         if note:
@@ -1172,7 +1258,7 @@ class MochiApp:
         segments = answer["segments"]
         self.spoken_text = " ".join(s[self.spoken_key].strip() for s in segments if s[self.spoken_key].strip())
         self.translated_text = "".join(s["zh"].strip() for s in segments)
-        self._set_headline(answer["headline_" + self.spoken_key], answer["headline_zh"])
+        self._set_headline(answer["headline_" + self.spoken_key], "" if answer.get("voice_ready") else answer["headline_zh"])
         self._show_content(self.spoken_text, self.translated_text)
         if self.hidden or not self.panel_open or self.answer_voice_token != self.speech_token:
             return
@@ -1196,7 +1282,13 @@ class MochiApp:
         if seq != self.request_seq:
             return
         self.awaiting_answer = False
-        self._present_answer(answer)
+        if self.early_voice:
+            self.last_answer = answer
+            self.translated_text = "".join(s["zh"].strip() for s in answer["segments"])
+            self._set_headline(answer["headline_" + self.spoken_key], answer["headline_zh"])
+            self.captions.translate(self.translated_text)
+        else:
+            self._present_answer(answer)
         self.history.extend([
             {"role": "user", "content": self.pending_question},
             {"role": "assistant", "content": " ".join(s["zh"] or s[self.spoken_key] for s in answer["segments"])},
@@ -1283,6 +1375,9 @@ class MochiApp:
             return
         self._show_content(self.spoken_text, self.translated_text, duration=duration)
         voiced = used not in ("muted", "unavailable")
+        if voiced:
+            log.info("reply playback ready after %.2fs provider=%s device=%s", time.monotonic() - self.sent_at,
+                     used, self.request_speech.device)
         self._set_status("SPEAKING" if voiced else "SUBTITLES", CORAL if voiced else TEAL)
         if not voiced and not self.speech.muted:
             self._set_hint("语音不可用，继续显示字幕")
@@ -1324,6 +1419,7 @@ class MochiApp:
 
     def stop_speech(self, *, keep_idle=False) -> None:
         self.captions.stop()
+        self._clear_standby_timer()
         if self.speech_stop is not None:
             self.speech_stop.set()
         if not (keep_idle and self.renderer_timer is not None):
@@ -1400,7 +1496,8 @@ class MochiApp:
         elif kind == "first":
             if event[1] == self.request_seq and self.awaiting_answer and not self.stream_started:
                 self.stream_started = True
-                self._present_answer(event[2], preview=True)
+                self.early_voice = bool(event[2].get('voice_ready'))
+                self._present_answer(event[2], preview=not self.early_voice)
         elif kind == "error":
             if event[1] == self.request_seq:
                 self.awaiting_answer = False

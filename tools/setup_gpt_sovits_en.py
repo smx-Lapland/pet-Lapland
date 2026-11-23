@@ -44,7 +44,7 @@ def main():
     subprocess.run(pip + ["--index-url", "https://pypi.org/simple", "numpy<2", "librosa==0.10.2",
                           "torchmetrics==1.5.2", "matplotlib", "g2p_en",
                           "nltk==3.9.1", "wordsegment", "rotary_embedding_torch", "x_transformers==2.4.14",
-                          "safetensors", "PyYAML", "miniaudio", "audiotsm==0.1.2"], check=True)
+                          "safetensors", "PyYAML", "miniaudio", "audiotsm==0.1.2", "praat-parselmouth==0.4.7"], check=True)
     subprocess.run([str(python), "-c",
                     "import nltk,sys; [nltk.download(item, download_dir=sys.argv[1], raise_on_error=True)"
                     " for item in ('cmudict','averaged_perceptron_tagger','averaged_perceptron_tagger_eng')]",

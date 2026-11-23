@@ -93,6 +93,20 @@ class ConnectionsTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 project_context("deleted")
 
+    def test_registered_empty_session_is_selectable(self):
+        from pet.dsh_projects import sessions
+        sid = "session-" + str(uuid4())
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"DSH_HOME": tmp}):
+            store = Path(tmp) / "storages"
+            cache = store / "session_projcache/sessions"
+            cache.mkdir(parents=True)
+            (store / "workspace.json").write_text(json.dumps({"global": {"workspaceIds": ["sample"]},
+                "tables": {"workspaces": {"sample": {"path": tmp, "sessionIds": [sid]}}}}))
+            (cache / (sid + ".json")).write_text(json.dumps({"record": {"identity": {"cwd": tmp},
+                "rows": {"title": {"val": "New session"}}}}))
+            self.assertEqual(sessions(projects()["sample"])[0][1], sid)
+            self.assertEqual(project_context("sample", sid)["最近对话摘录"], [])
+
     def test_two_compatible_connections_and_summary(self):
         received = []
         class Handler(BaseHTTPRequestHandler):
