@@ -1,55 +1,61 @@
-"""Divide bilingual captions into measured, single-line pages for the overlay."""
+"""Two clipped caption lines synchronized to one playback timeline."""
+import time
+import tkinter as tk
 
-import re
-
-
-def _lines(text, measure, width):
-    words = re.findall(r"[A-Za-zÀ-ÿ0-9]+(?:['’\-][A-Za-zÀ-ÿ0-9]+)*|\s+|.", text)
-    lines, line = [], ""
-    for word in words:
-        word = " " if word.isspace() else word
-        candidate = (line + word).lstrip()
-        if measure(candidate) <= width:
-            line = candidate
-            continue
-        if line.strip():
-            lines.append(line.rstrip())
-        line = ""
-        for char in word.lstrip():
-            if line and measure(line + char) > width:
-                lines.append(line)
-                line = ""
-            line += char
-    if line.strip():
-        lines.append(line.rstrip())
-    return lines or [""]
+from PIL import ImageTk
 
 
-def subtitle_pages(spoken, translation, spoken_font, translation_font, width):
-    # When the two texts have matching sentence boundaries, turn the page at
-    # the same thought in both languages, even when the translation is shorter.
-    boundary = r"(?<=[.!?])(?=\s)|(?<=[。！？])"
-    originals = [s for s in re.split(boundary, spoken) if s.strip()]
-    translations = [s for s in re.split(boundary, translation) if s.strip()]
-    groups = [(spoken, translation)]
-    if len(originals) == len(translations) and len(originals) > 1:
-        groups = []
-        for en, zh in zip(originals, translations):
-            if groups:
-                merged_en, merged_zh = groups[-1][0] + en, groups[-1][1] + zh
-                if spoken_font.measure(merged_en) <= width and translation_font.measure(merged_zh) <= width:
-                    groups[-1] = merged_en, merged_zh
-                    continue
-            groups.append((en.lstrip(), zh.lstrip()))
-    pages = []
-    for en, zh in groups:
-        pages.extend(_pair_lines(en, zh, spoken_font, translation_font, width))
-    return pages
+class ScrollingCaptions(tk.Canvas):
+    HEIGHT = 82
 
+    def __init__(self, parent, width, fonts, colors):
+        super().__init__(parent, width=width, height=self.HEIGHT, highlightthickness=0, bd=0)
+        self.viewport = width
+        self.backdrop = self.create_image(0, 0, anchor="nw")
+        self.rows = [self.create_text(2, y, anchor="nw", font=font, fill=color)
+                     for y, font, color in zip((3, 45), fonts, colors)]
+        self.timer = None
+        self.overflow = [0, 0]
+        self.progress = 0.0
+        self.bind("<MouseWheel>", self._wheel)
 
-def _pair_lines(spoken, translation, spoken_font, translation_font, width):
-    original = _lines(spoken, spoken_font.measure, width)
-    translated = _lines(translation, translation_font.measure, width)
-    count = max(len(original), len(translated))
-    return [(original[i * len(original) // count], translated[i * len(translated) // count])
-            for i in range(count)]
+    def set_backdrop(self, skin, x, y):
+        region = skin.crop((x, y, x + self.viewport, y + self.HEIGHT))
+        self.skin = ImageTk.PhotoImage(region, master=self)
+        self.itemconfigure(self.backdrop, image=self.skin)
+
+    def show(self, spoken, translated, duration=None):
+        self.stop()
+        for i, (item, text) in enumerate(zip(self.rows, (spoken, translated))):
+            self.itemconfigure(item, text=" ".join(text.split()))
+            bounds = self.bbox(item)
+            self.overflow[i] = max(0, bounds[2] - bounds[0] + 4 - self.viewport) if bounds else 0
+        self._position(0.0)
+        if duration and any(self.overflow):
+            self.duration = max(.1, duration)
+            self.started = time.monotonic()
+            self._tick()
+
+    def _position(self, progress):
+        self.progress = max(0.0, min(1.0, progress))
+        for item, distance in zip(self.rows, self.overflow):
+            self.coords(item, 2 - round(distance * self.progress), self.coords(item)[1])
+
+    def _tick(self):
+        self.timer = None
+        elapsed = time.monotonic() - self.started
+        hold = min(.55, self.duration * .12)
+        self._position((elapsed - hold) / (self.duration - 2 * hold))
+        if self.progress < 1:
+            self.timer = self.after(25, self._tick)
+
+    def _wheel(self, event):
+        if any(self.overflow):
+            self.stop()
+            self._position(self.progress - event.delta / 120 * 75 / max(self.overflow))
+        return "break"
+
+    def stop(self):
+        if self.timer is not None:
+            self.after_cancel(self.timer)
+            self.timer = None

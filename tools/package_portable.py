@@ -1,5 +1,6 @@
 """Build the Windows x64 starter and the example character from the installed app."""
 import importlib.metadata
+import argparse
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from packaging.requirements import Requirement
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from pet.characters import character, image_files, write_pack
+from pet.gpt_sovits_en import BUNDLE
 from pet.voice_input import FILES, MODEL_DIR
 
 
@@ -79,4 +81,16 @@ def build():
 
 
 if __name__ == "__main__":
-    build()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--lapland", action="store_true", help="export the Lapland character and available English voice")
+    if parser.parse_args().lapland:
+        role = character("lapland")
+        role.data["settings"].update(speech_provider="vits", speech_language="en")
+        assets = image_files(role)
+        out = ROOT / "dist"
+        out.mkdir(exist_ok=True)
+        if BUNDLE in assets:
+            write_pack(out / "Lapland-EN.petpack", role.data, assets)
+        write_pack(out / "Lapland.petpack", role.data, {k: p for k, p in assets.items() if k != BUNDLE})
+    else:
+        build()

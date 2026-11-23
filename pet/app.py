@@ -11,7 +11,6 @@ import time
 import tkinter as tk
 from tkinter import font as tkfont
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +36,7 @@ from .screen import (
     work_area,
 )
 from .speech import SpeechEngine, wav_duration, subtitle_duration
-from .subtitles import subtitle_pages
+from .subtitles import ScrollingCaptions
 from .voice_input import MIC_THRESHOLDS, SpeechGate, VoiceInput, VoiceInputError
 
 log = logging.getLogger("mochi.app")
@@ -121,8 +120,7 @@ class MochiApp:
         self.request_seq = 0
         self.awaiting_answer = False
         self.stream_started = False
-        self.segment_queue: queue.Queue | None = None
-        self.segment_index = 0
+        self.answer_voice_token = 0
         self.dialog: tk.Toplevel | None = None
         self.speech_token = 0
         self.speech_stop: threading.Event | None = None
@@ -265,6 +263,7 @@ class MochiApp:
             self.canvas.itemconfigure(self.tail_id, state="normal")
             self.canvas.itemconfigure(self.talk_window, state="normal")
             self.canvas.itemconfigure(self.conversation_window, state="normal")
+            self._warm_voice_for_input()
 
     def _close_panel(self):
         self._cancel_voice_input()
@@ -332,16 +331,14 @@ class MochiApp:
         rounded_rect(c, 174, 16, right + 6, 422, 28, fill=BUBBLE_SHADOW, outline="")
         self.tail_id = c.create_polygon(176, 258, 126, 288, 176, 318, fill=BUBBLE, outline="", smooth=True)
         rounded_rect(c, 167, 7, right + 1, 415, 24, fill=BUBBLE_BORDER, outline="")
-        self.bubble_skin = ImageTk.PhotoImage(self._backdrop(), master=self.root)
+        skin = self._backdrop()
+        self.bubble_skin = ImageTk.PhotoImage(skin, master=self.root)
         self.skin_item = c.create_image(168, 8, anchor="nw", image=self.bubble_skin)
 
         self.dot_id = c.create_oval(198, 33, 205, 40, fill=TEAL, outline="")
         self.role_label = c.create_text(215, 36, text=self.role_title, anchor="w", fill=CREAM, font=("Georgia", -16))
         self.status_id = c.create_text(
             320, 36, text="READY", anchor="w", fill=MUTED, font=("Segoe UI Semibold", -11)
-        )
-        self.counter_id = c.create_text(
-            right - 79, 35, text="", anchor="e", fill=WHITE, font=("Segoe UI Semibold", -13)
         )
         self.talk_button = tk.Button(self.root, text="按住说话", font=("Microsoft YaHei UI", -12),
                                      bg=CONTROL, fg=CREAM, activebackground=TEAL, relief="flat",
@@ -376,24 +373,12 @@ class MochiApp:
         self.headline_zh_id = c.create_text(
             self.CONTENT_X, 122, text="", anchor="nw", fill=GOLD, font=self.title_zh_font,
         )
-        self.en_id = c.create_text(
-            self.CONTENT_X, 199, text="", anchor="nw", fill=WHITE, font=self.spoken_font,
-        )
-        self.zh_id = c.create_text(
-            self.CONTENT_X, 241, text="", anchor="nw", fill=CREAM, font=self.translation_font,
-        )
+        self.captions = ScrollingCaptions(c, self.subtitle_width, (self.spoken_font, self.translation_font),
+                                          (WHITE, CREAM))
+        self.captions.set_backdrop(skin, self.CONTENT_X - 168, 196 - 8)
+        c.create_window(self.CONTENT_X, 196, anchor="nw", window=self.captions)
+        self.captions.bind("<Button-3>", self._popup_menu)
         c.create_line(self.CONTENT_X, 178, self.CONTENT_X + self.subtitle_width, 178, fill="#645863")
-        self.page_timer = None
-        self.page_index = 0
-        self.pages = [("", "")]
-        self.page_count_id = c.create_text(right - 84, 297, fill=MUTED, font=("Segoe UI", -12))
-        self.page_buttons = []
-        for x, step, symbol in [(right - 124, -1, "‹"), (right - 43, 1, "›")]:
-            tag = "page" + str(step)
-            hit = rounded_rect(c, x-14, 284, x+14, 310, 7, fill=CONTROL, outline="", tags=(tag,))
-            label = c.create_text(x, 296, text=symbol, fill=CREAM, font=("Georgia", -22), tags=(tag,))
-            c.tag_bind(tag, "<Button-1>", lambda _, delta=step: self._step_page(delta))
-            self.page_buttons.extend((hit, label))
         self.hint_id = c.create_text(
             198, 393, text="", anchor="w", fill=MUTED, font=("Microsoft YaHei UI", -12),
         )
@@ -614,7 +599,9 @@ class MochiApp:
             self.root.title(self.role_title)
             self.canvas.itemconfigure(self.role_label, text=self.role_title)
             self.canvas.itemconfigure(self.input_prompt_id, text=self.input_placeholder)
-            self.bubble_skin = ImageTk.PhotoImage(self._backdrop(), master=self.root)
+            skin = self._backdrop()
+            self.captions.set_backdrop(skin, self.CONTENT_X - 168, 196 - 8)
+            self.bubble_skin = ImageTk.PhotoImage(skin, master=self.root)
             self.canvas.itemconfigure(self.skin_item, image=self.bubble_skin)
             self._load_poses()
             self.pose = ""
@@ -694,39 +681,7 @@ class MochiApp:
         return self.canvas.bbox(item)
 
     def _show_content(self, en: str, zh: str, *, duration: float | None = None):
-        self._cancel_page_timer()
-        self.pages = subtitle_pages(en, zh, self.spoken_font, self.translation_font, self.subtitle_width)
-        self.page_index = 0
-        self._draw_page()
-        if duration and len(self.pages) > 1:
-            interval = max(1, round(duration * 1000 / len(self.pages)))
-            self.page_timer = self.root.after(interval, self._advance_page, interval)
-
-    def _draw_page(self):
-        en, zh = self.pages[self.page_index]
-        self._set_text(self.en_id, en)
-        self._set_text(self.zh_id, zh)
-        multi = len(self.pages) > 1
-        self._set_text(self.page_count_id, f"{self.page_index + 1} / {len(self.pages)}" if multi else "")
-        for item in self.page_buttons:
-            self.canvas.itemconfigure(item, state="normal" if multi else "hidden")
-
-    def _cancel_page_timer(self):
-        if self.page_timer is not None:
-            self.root.after_cancel(self.page_timer)
-            self.page_timer = None
-
-    def _advance_page(self, interval):
-        self.page_timer = None
-        self.page_index += 1
-        self._draw_page()
-        if self.page_index + 1 < len(self.pages):
-            self.page_timer = self.root.after(interval, self._advance_page, interval)
-
-    def _step_page(self, delta):
-        self._cancel_page_timer()
-        self.page_index = max(0, min(len(self.pages) - 1, self.page_index + delta))
-        self._draw_page()
+        self.captions.show(en, zh, duration)
 
     def _set_status(self, text: str, color: str = TEAL) -> None:
         self.canvas.itemconfigure(self.status_id, text=text)
@@ -734,9 +689,6 @@ class MochiApp:
 
     def _set_hint(self, text: str) -> None:
         self._set_text(self.hint_id, self._shortcut_text(text))
-
-    def _set_counter(self, text: str) -> None:
-        self.canvas.itemconfigure(self.counter_id, text=text)
 
     def _show_idle(self) -> None:
         self.state = "idle"
@@ -747,7 +699,6 @@ class MochiApp:
             "点「开始对话」就能直接说话，也可以框选屏幕让我讲解。",
         )
         self._set_hint("Ctrl+Alt+S 框选   ·   右键查看对话历史")
-        self._set_counter("")
 
     def _set_headline(self, en: str, zh: str) -> None:
         for item, text, font in [(self.headline_en_id, en, self.title_font),
@@ -771,7 +722,6 @@ class MochiApp:
             f"请设置 {self.client.key_env}，或在「模型与项目」切换服务。",
         )
         self._set_hint("右键 → 模型与项目")
-        self._set_counter("")
 
     def _show_thinking(self, follow_up: bool, has_image: bool) -> None:
         self.state = "thinking"
@@ -795,7 +745,6 @@ class MochiApp:
                 "正在读取你选中的区域，通常只需要几秒钟。",
             )
         self._set_hint("正在准备回答")
-        self._set_counter("")
 
     def _show_error(self, en: str, zh: str) -> None:
         self.state = "error"
@@ -804,7 +753,6 @@ class MochiApp:
         self._set_headline("That didn't work.", "这次没成功。")
         self._show_content(en, zh)
         self._set_hint("Try again with Ctrl+Alt+S   ·   right-click for menu")
-        self._set_counter("")
 
     # ---------- input ----------
 
@@ -834,7 +782,7 @@ class MochiApp:
             self._show_error("Microphone unavailable", str(exc))
             return
         self.conversation = gate
-        self._warm_gpu_for_input()
+        self._warm_voice_for_input()
         self.conversation_button.configure(text="结束对话", bg=CORAL)
         self.state = "idle"
         self._set_status("LISTENING", TEAL)
@@ -867,7 +815,7 @@ class MochiApp:
             return "break"
         self.voice_turn = threading.Event()
         self.talk_button.focus_set()
-        self._warm_gpu_for_input()
+        self._warm_voice_for_input()
         self.talk_button.grab_set()
         self.talk_button.configure(text="松开发送", bg=CORAL)
         self.state = "listening"
@@ -1022,12 +970,11 @@ class MochiApp:
         log.info("show input")
         self.stop_speech(keep_idle=True)
         self._set_input_visible(True)
-        self._warm_gpu_for_input()
+        self._warm_voice_for_input()
         if self.state != "thinking":
             self._set_pose("curious")
             self._set_status("ASK", TEAL)
         self._set_hint("Enter to ask   ·   Esc to close")
-        self._set_counter("")
 
     def hide_input(self) -> None:
         if self.input_visible:
@@ -1167,6 +1114,7 @@ class MochiApp:
         seq = self.request_seq
         self.pending_question = question
         self.request_speech = self.speech
+        self.answer_voice_token = self.speech_token
         self.spoken_key = self.client.language
         note = self.archive.requested_note(question)
         if note:
@@ -1181,9 +1129,7 @@ class MochiApp:
             acknowledgement = "Me lo ricorderò." if self.spoken_key == "it" else "I'll remember that."
             answer = {"headline_" + self.spoken_key: acknowledgement, "headline_zh":"已记住",
                       "segments":[{self.spoken_key:acknowledgement, "zh":"已记住：" + note}]}
-            self._begin_segments(answer)
-            if self.segment_queue is not None:
-                self.segment_queue.put(None)
+            self._present_answer(answer)
             return
         self.awaiting_answer = True
         self.stream_started = False
@@ -1221,31 +1167,28 @@ class MochiApp:
         else:
             self.events.put(("answer", seq, answer))
 
-    def _begin_segments(self, answer: dict[str, Any]) -> None:
+    def _present_answer(self, answer, *, preview=False):
         self.last_answer = answer
-        if self.hidden or not self.panel_open:
+        segments = answer["segments"]
+        self.spoken_text = " ".join(s[self.spoken_key].strip() for s in segments if s[self.spoken_key].strip())
+        self.translated_text = "".join(s["zh"].strip() for s in segments)
+        self._set_headline(answer["headline_" + self.spoken_key], answer["headline_zh"])
+        self._show_content(self.spoken_text, self.translated_text)
+        if self.hidden or not self.panel_open or self.answer_voice_token != self.speech_token:
             return
-        self._cancel_renderer_timer()
         self.state = "speaking"
         self._set_pose("smile")
-        self._set_status("PREPARING VOICE", GOLD)
-        segments = answer["segments"]
-        first = segments[0]
-        self._set_headline(answer["headline_" + self.spoken_key], answer["headline_zh"])
-        self._show_content(first[self.spoken_key], first["zh"])
-        self.segment_index = 0
-        self._set_counter("1 / …" if self.awaiting_answer else f"1 / {len(segments)}")
+        self._set_status("RECEIVING" if preview else "PREPARING VOICE", GOLD)
         self._set_hint("点角色停止朗读   ·   Ctrl+Alt+S 框选")
-
-        self.speech_token += 1
-        token = self.speech_token
+        if preview:
+            return
+        self._cancel_renderer_timer()
         self.speech_stop = threading.Event()
-        self.segment_queue = queue.Queue()
-        self.segment_queue.put((0, first))
         threading.Thread(
             target=self._speech_worker,
-            args=(self.segment_queue, self.request_seq, token, self.speech_stop, self.request_speech),
-            daemon=False,  # On exit, let the cancelled worker reap its child and delete its WAV.
+            args=(self.spoken_text, segments[0].get("emotion"), self.request_seq, self.speech_token,
+                  self.speech_stop, self.request_speech),
+            daemon=False,  # Let cancellation reap the worker and remove its temporary audio.
             name="mochi-speech",
         ).start()
 
@@ -1253,9 +1196,7 @@ class MochiApp:
         if seq != self.request_seq:
             return
         self.awaiting_answer = False
-        if not self.stream_started:
-            self._begin_segments(answer)
-        self.last_answer = answer
+        self._present_answer(answer)
         self.history.extend([
             {"role": "user", "content": self.pending_question},
             {"role": "assistant", "content": " ".join(s["zh"] or s[self.spoken_key] for s in answer["segments"])},
@@ -1278,20 +1219,9 @@ class MochiApp:
                                      name="lapland-memory").start()
                 if isinstance(self.dialog, HistoryDialog):
                     self.dialog.refresh()
-        self._set_headline(answer["headline_" + self.spoken_key], answer["headline_zh"])
-        if self.segment_queue is not None:
-            segments = answer["segments"]
-            self._set_counter(f"{self.segment_index + 1} / {len(segments)}")
-            for index, segment in enumerate(segments[1:], start=1):
-                self.segment_queue.put((index, segment))
-            self.segment_queue.put(None)
-        elif self.hidden or not self.panel_open or self.state == "thinking":
+        if self.speech_stop is None:
             self.state = "idle"
-            self._set_pose("victory")
             self._set_status("READY", TEAL)
-            self._show_content(answer["segments"][0][self.spoken_key], answer["segments"][0]["zh"])
-            self._set_hint("Ctrl+Alt+Space to ask a follow-up")
-        if self.segment_queue is None:
             self._resume_conversation()
 
     def _compact_history(self, client, archive):
@@ -1314,93 +1244,69 @@ class MochiApp:
         finally:
             self.compaction_lock.release()
 
-    def _speech_worker(self, items, seq, token, stop_event, speech) -> None:
-        provider = speech.provider
-        playing = None
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="pet-playback") as player:
-            while not stop_event.is_set():
-                try:
-                    item = items.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-                if item is None:
-                    break
-                index, segment = item
-                text = segment[speech.language]
-                try:
-                    direction = {"emotion": segment["emotion"]} if segment.get("emotion") else {}
-                    path, used = speech.prepare_segment(text, stop_event, provider, **direction)
-                except Exception as exc:
-                    log.warning("voice unavailable (%s)", type(exc).__name__)
-                    path, used = None, "unavailable"
-                if used == "sapi":
-                    provider = "sapi"
-                # Prepare one segment during playback; the subtitle changes only at its turn.
-                if playing is not None:
-                    playing.result()
-                playing = player.submit(self._play_segment, seq, token, index, text, path, used, stop_event, speech)
-        if not stop_event.is_set():
-            self.events.put(("speech_done", seq, token))
-
-    def _play_segment(self, seq, token, index, text, path, used, stop_event, speech):
+    def _speech_worker(self, text, emotion, seq, token, stop_event, speech):
+        path = None
         try:
             if stop_event.is_set():
                 return
             try:
+                direction = {"emotion": emotion} if emotion else {}
+                path, used = speech.prepare_segment(text, stop_event, speech.provider, **direction)
                 duration = wav_duration(path) if path else subtitle_duration(text)
-                self.events.put(("segment", seq, token, index, used, duration))
-                if path and speech.play_file(path, stop_event):
-                    return
-                if path:
-                    self.events.put(("segment", seq, token, index, "unavailable"))
             except Exception as exc:
                 log.warning("voice unavailable (%s)", type(exc).__name__)
-                self.events.put(("segment", seq, token, index, "unavailable"))
-            speech.wait_timed(text, stop_event)
+                used, duration = "unavailable", subtitle_duration(text)
+            if stop_event.is_set():
+                return
+            self.events.put(("playback", seq, token, used, duration))
+            played = False
+            if path and used != "unavailable":
+                try:
+                    played = speech.play_file(path, stop_event)
+                except Exception as exc:
+                    log.warning("playback unavailable (%s)", type(exc).__name__)
+                if not played and not stop_event.is_set():
+                    self.events.put(("audio_unavailable", seq, token))
+            if not played and not stop_event.is_set():
+                speech.wait_timed(text, stop_event)
         finally:
             if path:
                 try:
                     path.unlink(missing_ok=True)
                 except OSError:
                     log.warning("could not remove temporary audio")
+            if not stop_event.is_set():
+                self.events.put(("speech_done", seq, token))
 
-    def _on_segment(self, seq: int, token: int, index: int, used: str, duration=None) -> None:
+    def _on_playback(self, seq, token, used, duration):
         if seq != self.request_seq or token != self.speech_token or not self.last_answer:
             return
-        segments = self.last_answer["segments"]
-        if index >= len(segments):
-            return
-        segment = segments[index]
-        self._show_content(segment[self.spoken_key], segment["zh"],
-                           duration=duration or subtitle_duration(segment[self.spoken_key]))
-        self.segment_index = index
-        self._set_counter(f"{index + 1} / {'…' if self.awaiting_answer else len(segments)}")
+        self._show_content(self.spoken_text, self.translated_text, duration=duration)
         voiced = used not in ("muted", "unavailable")
         self._set_status("SPEAKING" if voiced else "SUBTITLES", CORAL if voiced else TEAL)
         if not voiced and not self.speech.muted:
-            self._set_hint("Audio unavailable · 语音不可用，继续显示字幕")
+            self._set_hint("语音不可用，继续显示字幕")
         elif used == "sapi" and self.speech.provider != "sapi":
             self._set_hint("已切换至所选语言的系统语音")
 
     def _on_speech_done(self, seq: int, token: int) -> None:
         if seq != self.request_seq or token != self.speech_token:
             return
-        if not self._warm_gpu_for_input():
+        if not self._warm_voice_for_input():
             self.request_speech.close_renderer()
         self.speech_stop = None
-        self.segment_queue = None
         self._set_pose("victory")
         self.state = "idle"
         self._set_status("READY", TEAL)
         self._set_hint("Ctrl+Alt+S 框选   ·   右键查看对话历史")
-        self._set_counter("")
         self._resume_conversation()
 
-    def _warm_gpu_for_input(self):
-        if self.speech.device != "cuda" or self.speech.muted or self.speech.provider not in ("lapland", "vits"):
+    def _warm_voice_for_input(self):
+        if self.hidden or not self.panel_open or self.speech.muted or self.speech.provider not in ("sapi", "lapland", "vits"):
             return False
+        if self.renderer_timer is None:
+            self.speech.warmup()
         self._cancel_renderer_timer()
-        self.speech.warmup()
         self.renderer_timer = self.root.after(30000, self._release_idle_renderer)
         return True
 
@@ -1411,11 +1317,13 @@ class MochiApp:
 
     def _release_idle_renderer(self):
         self.renderer_timer = None
-        self.speech.close_renderer()
+        if self.panel_open and not self.hidden and (self.conversation or self.input_visible or self.voice_turn):
+            self.renderer_timer = self.root.after(30000, self._release_idle_renderer)
+        else:
+            self.speech.close_renderer()
 
     def stop_speech(self, *, keep_idle=False) -> None:
-        self._cancel_page_timer()
-        self.segment_queue = None
+        self.captions.stop()
         if self.speech_stop is not None:
             self.speech_stop.set()
         if not (keep_idle and self.renderer_timer is not None):
@@ -1428,7 +1336,6 @@ class MochiApp:
             self.state = "idle"
             self._set_status("READY", TEAL)
             self._set_hint("Ctrl+Alt+Space to ask a follow-up   ·   Ctrl+Alt+S for a new region")
-            self._set_counter("")
             self._resume_conversation()
 
     def toggle_mute(self) -> None:
@@ -1493,15 +1400,18 @@ class MochiApp:
         elif kind == "first":
             if event[1] == self.request_seq and self.awaiting_answer and not self.stream_started:
                 self.stream_started = True
-                self._begin_segments(event[2])
+                self._present_answer(event[2], preview=True)
         elif kind == "error":
             if event[1] == self.request_seq:
                 self.awaiting_answer = False
                 self.stop_speech()
                 self._show_error(event[2], event[3])
                 self._resume_conversation()
-        elif kind == "segment":
-            self._on_segment(*event[1:])
+        elif kind == "playback":
+            self._on_playback(*event[1:])
+        elif kind == "audio_unavailable" and event[1:3] == (self.request_seq, self.speech_token):
+            self._set_status("SUBTITLES", TEAL)
+            self._set_hint("语音不可用，继续显示字幕")
         elif kind == "speech_done":
             self._on_speech_done(event[1], event[2])
 

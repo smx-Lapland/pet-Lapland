@@ -48,6 +48,11 @@ class StreamTest(unittest.TestCase):
             chunk = {"choices": [{"delta": {"content": piece}}]}
             yield b"data: " + json.dumps(chunk).encode() + b"\n"
 
+    def test_complete_single_segment_keeps_longer_spoken_explanations(self):
+        line = "Carefully compare the measurements. " * 17 + "Now check the final result."
+        segment = {"en": line, "zh": "逐项比较测量值，再核对结果。"}
+        self.assertEqual(normalize_answer({"segments": [segment]})["segments"], [segment])
+
     def test_first_segment_precedes_end(self):
         raw = json.dumps(ANSWER, ensure_ascii=False)
         split = raw.index("}, {") + 1
@@ -111,7 +116,7 @@ class VoiceTest(unittest.TestCase):
     def test_cpu_setting_and_missing_gpu_keep_cpu_runtime(self):
         from pet.speech import SpeechEngine
         for installed, mode in ((True, "cpu"), (False, "auto")):
-            with patch("pet.speech.cuda_installed", return_value=installed):
+            with patch("pet.speech.cuda_installed", return_value=installed), patch("pet.speech.installed_voice", return_value=(None, None)):
                 engine = SpeechEngine({"voice_device": mode, "speech_provider": "vits"}, Path("unused"))
                 self.assertEqual(engine._neural_env()["PET_TTS_DEVICE"], "cpu")
 
@@ -121,7 +126,8 @@ class VoiceTest(unittest.TestCase):
                   "job = json.loads(sys.stdin.buffer.readline())\n"
                   "pathlib.Path(job['path'] + '.pending').touch()\n"
                   "time.sleep(30)\n")
-        engine = SpeechEngine({"speech_provider": "vits"}, Path("unused"))
+        with patch("pet.speech.installed_voice", return_value=(None, None)):
+            engine = SpeechEngine({"speech_provider": "vits"}, Path("unused"))
         stop = threading.Event()
         with tempfile.TemporaryDirectory() as tmp, patch("pet.speech.CACHE_DIR", Path(tmp)), \
              patch.object(engine, "_neural_command", return_value=[sys._base_executable, "-c", worker]):
@@ -143,39 +149,31 @@ class VoiceTest(unittest.TestCase):
             self.assertIsNotNone(proc.poll())
             self.assertFalse(list(Path(tmp).iterdir()))
 
-    def test_second_segment_is_prepared_during_first_without_early_subtitles(self):
+    def test_one_audio_file_for_a_complete_reply(self):
         from unittest.mock import Mock
+        from pet.speech import wav_duration
+        import wave
+
         app = object.__new__(MochiApp)
         app.events = queue.Queue()
-        release = threading.Event()
-        prepared = threading.Event()
-        started = threading.Event()
-        speech = Mock(provider="sapi", language="en")
-        def prepare(text, *_):
-            if text == "two":
-                prepared.set()
-            return None, "muted"
-        def wait(text, _stop):
-            if text == "one":
-                started.set()
-                release.wait(3)
-        speech.prepare_segment.side_effect = prepare
-        speech.wait_timed.side_effect = wait
-        items = queue.Queue()
-        for item in ((0, {"en": "one"}), (1, {"en": "two"}), None):
-            items.put(item)
-        thread = threading.Thread(target=app._speech_worker, args=(items, 1, 1, threading.Event(), speech))
-        thread.start()
-        try:
-            self.assertTrue(started.wait(2))
-            self.assertTrue(prepared.wait(2))
-            self.assertEqual(app.events.get_nowait()[:4], ("segment", 1, 1, 0))
-            self.assertTrue(app.events.empty())
-        finally:
-            release.set()
-            thread.join(3)
-        self.assertEqual(app.events.get_nowait()[:4], ("segment", 1, 1, 1))
-        self.assertEqual(app.events.get_nowait(), ("speech_done", 1, 1))
+        speech = Mock(provider="vits")
+        stop = threading.Event()
+        text = "First, choose a card. Now turn it over. Your move."
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "reply.wav"
+            with wave.open(str(path), "wb") as wav:
+                wav.setparams((1, 2, 16000, 0, "NONE", ""))
+                wav.writeframes(bytes(32000))
+            duration = wav_duration(path)
+            speech.prepare_segment.return_value = path, "vits"
+            speech.play_file.return_value = True
+            app._speech_worker(text, "MOCKING", 1, 2, stop, speech)
+            speech.prepare_segment.assert_called_once_with(text, stop, "vits", emotion="MOCKING")
+            speech.play_file.assert_called_once_with(path, stop)
+            self.assertFalse(path.exists())
+        self.assertEqual(app.events.get_nowait(), ("playback", 1, 2, "vits", duration))
+        self.assertEqual(app.events.get_nowait(), ("speech_done", 1, 2))
+        self.assertTrue(app.events.empty())
 
     def test_hands_free_gate_uses_level_preroll_and_silence(self):
         from array import array
@@ -444,30 +442,47 @@ class DesktopTest(unittest.TestCase):
         app._close_panel()
         self.assertFalse(app.hidden or app.input_visible)
 
-    def test_two_line_captions_and_cancellation(self):
+    def test_two_line_captions_scroll_with_playback_and_allow_review(self):
         self.app._open_panel()
-        for line in ("Your move, Doctor. Shall we turn the next card together?",
-                     "Tocca a te, Dottore. Scopriamo insieme la prossima carta?"):
-            translation = "轮到你了，博士。一起翻开下一张牌吧？"
-            self.app._show_content(line, translation)
-            self.assertGreater(self.app.spoken_font.measure(line), 472)
-            if self.app.spoken_font.measure(line) <= self.app.subtitle_width:
-                self.assertEqual(self.app.pages, [(line, translation)])
-        spoken = "Davvero, Dottore? " + "Prima scegli una carta, poi vediamo chi ride. " * 6
-        chinese = "真的吗，博士？" + "先选张牌，再看看谁会笑到最后。" * 6
-        self.app._show_content(spoken, chinese, duration=0.4)
-        self.assertGreater(len(self.app.pages), 1)
-        self.until(lambda: self.app.page_index > 0)
-        for i in range(len(self.app.pages)):
-            self.app._step_page(i - self.app.page_index)
-            en = self.app.canvas.bbox(self.app.en_id)
-            zh = self.app.canvas.bbox(self.app.zh_id)
-            self.assertLess(en[3], zh[1])
-            self.assertLessEqual(max(en[2], zh[2]), self.app.CONTENT_X + self.app.subtitle_width + 2)
-        self.assertIsNone(self.app.page_timer)
-        self.app._show_content("Next.", "下一句。")
-        self.assertEqual(self.app.pages, [("Next.", "下一句。")])
-        self.assertEqual(self.app.canvas.itemcget(self.app.page_count_id, "state"), "hidden")
+        caps = self.app.captions
+        en, zh = caps.rows
+        short = "轮到你了，博士。"
+        long = "Prima scegli una carta, poi vediamo chi ride. " * 6
+        self.app._show_content(long, short, duration=.5)
+        self.app.root.update()
+        self.assertEqual(caps.winfo_width(), self.app.subtitle_width)
+        self.assertGreater(caps.overflow[0], caps.viewport)
+        self.assertEqual(caps.overflow[1], 0)
+        self.assertLess(caps.bbox(en)[3], caps.bbox(zh)[1])
+        self.until(lambda: 0 < caps.progress < 1)
+        self.assertLess(caps.coords(en)[0], 2)
+        self.assertEqual(caps.coords(zh)[0], 2)
+        self.until(lambda: caps.progress == 1)
+        self.assertLessEqual(caps.bbox(en)[2], caps.viewport)
+        self.assertEqual(caps.itemcget(en, "text"), long.strip())
+        caps.event_generate("<MouseWheel>", delta=120)
+        self.assertLess(caps.progress, 1)
+        self.assertIsNone(caps.timer)
+        self.app._show_content(long, short * 12, duration=4)
+        self.assertTrue(all(caps.overflow))
+        self.app.stop_speech()
+        self.assertIsNone(caps.timer)
+        self.app._show_content("Next.", "下一句。", duration=2)
+        self.assertEqual(caps.progress, 0)
+        self.assertIsNone(caps.timer)
+
+    def test_stream_preview_waits_for_complete_answer_and_only_speaks_once(self):
+        self.gate.clear()
+        with patch.object(self.app.speech, "prepare_segment", return_value=(None, "muted")) as render:
+            self.select().send()
+            self.until(lambda: self.app.stream_started)
+            render.assert_not_called()
+            self.gate.set()
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            self.assertEqual(render.call_count, 1)
+            self.assertEqual(render.call_args.args[0], " ".join(s["en"] for s in ANSWER["segments"]))
+            caps = self.app.captions
+            self.assertEqual(caps.itemcget(caps.rows[1], "text"), "".join(s["zh"] for s in ANSWER["segments"]))
 
     def test_browse_previous_conversation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -525,7 +540,7 @@ class DesktopTest(unittest.TestCase):
             self.app._start_ask(None, "月光从哪来？", False)
             self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
             self.assertEqual(spoken, [answer["segments"][0]["it"]])
-            self.assertEqual(self.app.canvas.itemcget(self.app.zh_id, "text"), answer["segments"][0]["zh"])
+            self.assertEqual(self.app.captions.itemcget(self.app.captions.rows[1], "text"), answer["segments"][0]["zh"])
             self.assertIn(spoken[0], self.app.transcript[-1])
 
     def test_gpu_renderer_is_reused_for_input_and_released_on_hide(self):
@@ -541,6 +556,20 @@ class DesktopTest(unittest.TestCase):
             self.assertEqual(timer, app.renderer_timer)
             close.assert_not_called()
             app._hide_window()
+            close.assert_called_once()
+            self.assertIsNone(app.renderer_timer)
+
+    def test_cpu_voice_stays_warm_while_chatting_and_releases_when_closed(self):
+        app = self.app
+        app.speech.provider, app.speech.device, app.speech.muted = "vits", "cpu", False
+        with patch.object(app.speech, "warmup") as warmup, patch.object(app.speech, "close_renderer") as close:
+            app.show_input()
+            warmup.assert_called_once()
+            app._cancel_renderer_timer()
+            app._release_idle_renderer()
+            self.assertIsNotNone(app.renderer_timer)
+            close.assert_not_called()
+            app._close_panel()
             close.assert_called_once()
             self.assertIsNone(app.renderer_timer)
 
@@ -575,13 +604,13 @@ class DesktopTest(unittest.TestCase):
         self.select().send()
         self.until(lambda: self.app.stream_started)
         self.assertTrue(self.app.awaiting_answer)
-        self.assertEqual(self.app.canvas.itemcget(self.app.zh_id, "text"), ANSWER["segments"][0]["zh"])
+        self.assertEqual(self.app.captions.itemcget(self.app.captions.rows[1], "text"), ANSWER["segments"][0]["zh"])
         self.app.begin_capture()
         self.assertFalse(self.app.capturing)
         self.app.stop_speech()
         self.gate.set()
         self.until(lambda: not self.app.awaiting_answer)
-        self.assertIsNone(self.app.segment_queue)
+        self.assertIsNone(self.app.speech_stop)
         self.assertEqual(self.app.state, "idle")
         with tempfile.TemporaryDirectory() as tmp, patch("pet.config.CONFIG_PATH", Path(tmp) / "config.json"):
             self.app.show_settings()

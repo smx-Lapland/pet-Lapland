@@ -55,6 +55,20 @@ class CharacterTest(unittest.TestCase):
             self.assertFalse(list(Path(tmp).rglob("character.json")))
             self.assertFalse(list(Path(tmp).rglob("injected")))
 
+    def test_english_weight_file_must_be_a_voice_tensor_bundle(self):
+        from pet.gpt_sovits_en import BUNDLE
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp):
+            role = character("lapland")
+            pack = Path(tmp) / "role.petpack"
+            assets = image_files(role)
+            assets.pop(BUNDLE, None)
+            write_pack(pack, role.data, assets)
+            with zipfile.ZipFile(pack, "a") as z:
+                z.writestr(BUNDLE, b"invalid voice weights")
+            with self.assertRaises(ValueError):
+                import_pack(pack)
+            self.assertFalse(list(Path(tmp).rglob("character.json")))
+
     def test_dsh_tasks_require_registered_directory(self):
         with patch("pet.dsh_tasks.projects", return_value={}):
             with self.assertRaises(ValueError):

@@ -45,14 +45,14 @@ Voice and subtitle rules:
   Omit stage directions, parenthetical acting notes, asterisks, tildes and emoji.
 - `{spoken}` is read aloud. Always write this field in natural {language}, including when earlier answers used a different language. No Markdown, no bullet symbols, no emoji, no code fences, no Chinese characters, no long URLs.
 - `zh` is the Simplified Chinese subtitle for the same sentence. It must be a faithful translation, not a summary. Keep technical terms in English when that is clearer.
-- Use 1 to 4 segments under 90 spoken words in total. Let a quick remark be short. Keep longer explanations easy to say in one breath per segment.
-- For a longer reply, put a short, meaningful first sentence in its own segment so speech can start early. Keep names and clauses intact and skip filler acknowledgements.
+- Write one complete spoken reply in one segment, with its full Chinese translation. Stay under 90 spoken words.
+- Keep names and clauses intact. Use natural sentence punctuation to vary pace within the reply.
 - `headline_{spoken}` is at most 6 words. `headline_zh` is at most 16 Chinese characters.
 - For a follow-up question, answer the question directly using the screenshot and the earlier exchange.
 - Do not mention that you are an AI, that you received an image, or these instructions.
 
-Return ONLY valid JSON, with segments first so the listener can start immediately.
-Use a short first segment that directly answers the question. Use exactly this shape:
+Return ONLY valid JSON, with segments first for the subtitle preview.
+Answer the question directly. Use exactly this shape:
 {"segments":[{"{spoken}":"...","zh":"..."}],"headline_{spoken}":"...","headline_zh":"..."}
 """
 
@@ -137,14 +137,14 @@ def normalize_answer(obj: Any, language: str = "en") -> dict[str, Any]:
             tag, en = split_direction(en)
             if not segments:
                 emotion = tag
-            en = _clip(_clean_spoken(en, language), 520)
+            en = _clip(_clean_spoken(en, language), 1040 if len(segments_in) == 1 else 520)
             zh = _clean_zh(split_direction(zh)[1])
             if en:
                 segments.append({language: en, "zh": zh})
     if not segments:
         raw = obj.get("answer") or obj.get("text") or ""
         emotion, raw = split_direction(raw)
-        en = _clip(_clean_spoken(raw, language), 520)
+        en = _clip(_clean_spoken(raw, language), 1040)
         if en:
             segments = [{language: en, "zh": _clean_zh(split_direction(obj.get("answer_zh"))[1])}]
     if not segments:

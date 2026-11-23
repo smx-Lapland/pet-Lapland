@@ -13,6 +13,7 @@ from pathlib import Path
 from PIL import Image
 
 from .config import APP_DIR, DEFAULTS, validate_connection
+from .gpt_sovits_en import BUNDLE, FORMAT, MOODS, RUNTIME
 
 POSES = ("wait", "curious", "ponder", "impatient", "smile", "victory", "flustered")
 IMAGES = {f"{name}.png" for name in (*POSES, "portrait", "background")}
@@ -23,6 +24,7 @@ SHARE_KEYS = CHAT_KEYS + VOICE_KEYS
 MAX_FILE = 12 * 1024 * 1024
 MODEL_FILES = {"voice.onnx", "voice.onnx.json"}
 MAX_MODEL = 256 * 1024 * 1024
+VOICE_LIMITS = {"voice.onnx": MAX_MODEL, "voice.onnx.json": 256000, BUNDLE: 288 * 1024 * 1024}
 
 
 def library():
@@ -98,10 +100,12 @@ def available_characters():
 
 
 def image_files(role):
-    result = {name: role.folder / name for name in IMAGES | MODEL_FILES if (role.folder / name).is_file()}
+    result = {name: role.folder / name for name in IMAGES | VOICE_LIMITS.keys() if (role.folder / name).is_file()}
     result.setdefault("portrait.png", role.sprite("wait"))
     if role.id == "lapland":
         result["background.png"] = role.folder / "dialog-skin.webp"
+        if (RUNTIME / "active" / BUNDLE).is_file():
+            result[BUNDLE] = RUNTIME / "active" / BUNDLE
     return result
 
 
@@ -117,9 +121,11 @@ def write_pack(dest, data, assets):
                 raise ValueError("请选择一张基础立绘。")
             check_voice_files(manifest, set(assets))
             for name, path in assets.items():
-                if name in MODEL_FILES:
-                    if path.stat().st_size > (MAX_MODEL if name == "voice.onnx" else 256000):
+                if name in VOICE_LIMITS:
+                    if path.stat().st_size > VOICE_LIMITS[name]:
                         raise ValueError("语音模型超过角色包的大小限制。")
+                    if name == BUNDLE:
+                        validate_english_weights(path)
                     z.write(path, name)
                     continue
                 if name not in IMAGES:
@@ -148,8 +154,8 @@ def import_pack(source, *, local_copy=False):
         entries = z.infolist()
         names = {i.filename for i in entries}
         if (len(names) != len(entries) or not {"portrait.png", "character.json"} <= names
-                or names - IMAGES - MODEL_FILES - {"character.json"}
-                or any(i.file_size > (MAX_MODEL if i.filename == "voice.onnx" else MAX_FILE) for i in entries)
+                or names - IMAGES - VOICE_LIMITS.keys() - {"character.json"}
+                or any(i.file_size > VOICE_LIMITS.get(i.filename, MAX_FILE) for i in entries)
                 or z.getinfo("character.json").file_size > 256000):
             raise ValueError("角色包包含无效的文件、大小或目录。")
         data = clean_manifest(json.loads(z.read("character.json").decode("utf-8-sig")))
@@ -169,6 +175,10 @@ def import_pack(source, *, local_copy=False):
             for name in MODEL_FILES:
                 with z.open(name) as src, (stage / name).open("wb") as dst:
                     shutil.copyfileobj(src, dst)
+        if BUNDLE in names:
+            with z.open(BUNDLE) as src, (stage / BUNDLE).open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            validate_english_weights(stage / BUNDLE)
         (stage / "character.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
         for name in names & IMAGES:
             raw = z.read(name)
@@ -185,3 +195,23 @@ def import_pack(source, *, local_copy=False):
 def check_voice_files(manifest, names):
     if (names & MODEL_FILES or manifest["settings"]["speech_provider"] == "piper") and not MODEL_FILES <= names:
         raise ValueError("本地 Piper 音色需要 .onnx 权重和同名的 .onnx.json 配置。")
+
+
+def validate_english_weights(path):
+    from safetensors import SafetensorError, safe_open
+    try:
+        with safe_open(str(path), framework="numpy") as tensors:
+            names = set(tensors.keys())
+            required = {f"ref.{m}.{key}" for m in MOODS for key in ("prompt", "spec", "phones")}
+            if ((tensors.metadata() or {}).get("format") == FORMAT and required <= names
+                    and any(k.startswith("gpt.") for k in names) and any(k.startswith("sovits.") for k in names)):
+                for key in required:
+                    tensor = tensors.get_slice(key)
+                    shape = tensor.get_shape()
+                    prefix, dtype = ([1, 1025], "F32") if key.endswith(".spec") else ([1], "I64")
+                    if shape[:-1] != prefix or not 1 <= shape[-1] <= 1024 or tensor.get_dtype() != dtype:
+                        raise ValueError("英配参考特征的形状或数据类型无效。")
+                return
+    except (OSError, ValueError, RuntimeError, SafetensorError) as exc:
+        raise ValueError("英配权重文件损坏。") from exc
+    raise ValueError("英配权重缺少 GPT-SoVITS v2 参数或情绪参考。")

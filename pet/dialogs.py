@@ -197,7 +197,7 @@ class SettingsDialog(tk.Toplevel):
                 widget = ttk.Entry(body, textvariable=var, width=30)
             widget.grid(row=row, column=1, sticky="ew")
         row = len(fields)
-        for key, label in [("confirm_capture", "每次框选后预览确认"), ("stream", "流式显示并朗读首段"),
+        for key, label in [("confirm_capture", "每次框选后预览确认"), ("stream", "流式预览字幕，收齐后整条朗读"),
                            ("muted", "静音，仅显示字幕"), ("save_history", "在本机保存新对话的文字记录")]:
             var = self.fields[key] = tk.BooleanVar(self, value=cfg[key])
             ttk.Checkbutton(body, text=label, variable=var).grid(row=row, columnspan=2, sticky="w")

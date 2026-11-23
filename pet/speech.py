@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CACHE_DIR
+from .gpt_sovits_en import RUNTIME, installed_voice
 from .voice_device import cuda_installed
 
 log = logging.getLogger("mochi.speech")
@@ -30,14 +31,18 @@ class SpeechEngine:
     def __init__(self, cfg: dict[str, Any], script_path: Path):
         self.voice = str(cfg.get("voice", "Zira"))
         self.provider = cfg.get("speech_provider", "lapland")
-        self.device = ("cuda" if cfg.get("voice_device", "auto") == "auto"
-                       and self.provider in ("lapland", "vits", "piper") and cuda_installed() else "cpu")
         self.language = "it" if cfg.get("speech_language") == "it" else "en"
+        self.character_id = cfg.get("character_id", "lapland")
+        self.english_bundle = None
+        self.english_python = None
+        if self.provider == "vits" and self.language == "en":
+            self.english_bundle, self.english_python = installed_voice(self.character_id)
+        self.device = ("cuda" if cfg.get("voice_device", "auto") == "auto"
+                       and self.provider in ("lapland", "vits", "piper") and (self.english_bundle or cuda_installed()) else "cpu")
         self.neural_voice = (cfg.get("neural_voice_it", "it-IT-ElsaNeural") if self.language == "it"
                              else cfg.get("neural_voice", "en-US-JennyNeural"))
         self.rate = int(cfg.get("rate", 0))
         self.api = {k: cfg.get(k, "") for k in ("tts_base", "tts_model", "tts_voice", "tts_key_env")}
-        self.character_id = cfg.get("character_id", "lapland")
         self.muted = bool(cfg.get("muted", False))
         self.script_path = script_path
         self._powershell = self._find_powershell()
@@ -47,6 +52,8 @@ class SpeechEngine:
 
     def _neural_command(self):
         # Launch the interpreter directly so cancellation also stops native inference.
+        if self.english_bundle:
+            return [str(self.english_python), str(Path(__file__).with_name("gpt_sovits_en.py"))]
         return [getattr(sys, "_base_executable", None) or sys.executable,
                 str(Path(__file__).with_name("neural_worker.py"))]
 
@@ -55,7 +62,14 @@ class SpeechEngine:
                 "Bypass", "-File", str(self.script_path)]
 
     def _neural_env(self):
-        return {**os.environ, "__PYVENV_LAUNCHER__": sys.executable, "PET_TTS_DEVICE": self.device}
+        env = {**os.environ, "__PYVENV_LAUNCHER__": sys.executable, "PET_TTS_DEVICE": self.device}
+        if self.english_bundle:
+            env.update(__PYVENV_LAUNCHER__=str(RUNTIME / "venv/Scripts/python.exe"),
+                       PET_ENGLISH_WEIGHTS=str(self.english_bundle), PYTHONUTF8="1")
+            conda_bin = self.english_python.parent / "Library/bin"
+            if conda_bin.is_dir():
+                env["PATH"] = str(conda_bin) + os.pathsep + env.get("PATH", "")
+        return env
 
     def warmup(self):
         if self.muted or self.provider not in ("sapi", "vits", "lapland"):
@@ -259,7 +273,7 @@ class SpeechEngine:
 
 def subtitle_duration(text: str) -> float:
     words = max(1, len(text.split()))
-    return min(14.0, max(2.8, words * 0.42 + 1.1))
+    return min(90.0, max(2.8, words * 0.42 + 1.1))
 
 
 def run_worker(command, stop_event, timeout, data=None, env=None) -> bool:
