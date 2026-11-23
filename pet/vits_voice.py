@@ -132,7 +132,8 @@ class ReferenceVoice:
             # Piper otherwise gives this final vocative a full clause break.
             # Leave other comma boundaries and the displayed text alone.
             text = re.sub(r"(?<=\w),[ \t]+(Doctor)(?=[ \t]*(?:[?!.…]|$))", r" \1", text, flags=re.I)
-            duration *= .89
+            # Match the brisk English takes while timing the pause after a question separately.
+            duration *= .67
         cfg = SynthesisConfig(length_scale=duration * 2 ** (-max(-10, min(10, rate)) / 10))
         parts = []
         next_pause = pause

@@ -250,7 +250,7 @@ class VoiceTest(unittest.TestCase):
         audio = ReferenceVoice.generate(voice, line, "MOCKING", contour=False)
         spoken, cfg = voice.piper.synthesize.call_args.args
         self.assertEqual(spoken, "Is that your best trick Doctor? Look, Doctor Bell, a red, blue and gold card.")
-        self.assertLess(cfg.length_scale, 1)
+        self.assertLess(cfg.length_scale, .8)
         active = np.flatnonzero(np.abs(audio) > .01)
         self.assertLess(active[0] / RATE, .06)
         self.assertLess((len(audio) - active[-1]) / RATE, .06)
