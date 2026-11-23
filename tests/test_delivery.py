@@ -1,0 +1,385 @@
+import copy
+import json
+import os
+import tempfile
+import threading
+import time
+import tkinter as tk
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+from xml.etree import ElementTree as ET
+
+from PIL import Image
+
+from pet.app import MochiApp
+from pet.config import DEFAULTS
+from pet.dialogs import CapturePreview
+from pet.history import ConversationHistory
+from pet.llm import DeepSeekClient, LLMError
+from pet.neural_worker import azure_audio, english_beats, italian_beats, original_recording, render_italian
+from pet.screen import set_dpi_awareness
+
+
+ANSWER = {"headline_en": "Test card", "headline_zh": "测试卡",
+          "segments": [{"en": "The first square is blue.", "zh": "第一块为蓝色。"},
+                       {"en": "The second square is black.", "zh": "第二块为黑色。"}]}
+
+
+class StreamTest(unittest.TestCase):
+    def lines(self, pieces):
+        for piece in pieces:
+            chunk = {"choices": [{"delta": {"content": piece}}]}
+            yield b"data: " + json.dumps(chunk).encode() + b"\n"
+
+    def test_first_segment_precedes_end(self):
+        raw = json.dumps(ANSWER, ensure_ascii=False)
+        split = raw.index("}, {") + 1
+        first = []
+
+        def stream():
+            yield from self.lines(raw[:split])
+            self.assertEqual(first[0]["segments"], ANSWER["segments"][:1])
+            yield from self.lines(raw[split:])
+            yield b"data: [DONE]\n"
+
+        body = DeepSeekClient._read_stream(stream(), first.append)
+        self.assertEqual(len(first), 1)
+        self.assertEqual(json.loads(DeepSeekClient._extract_content(body)), ANSWER)
+
+    def test_stream_break_after_first_is_not_replayed(self):
+        raw = json.dumps(ANSWER)
+        lines = self.lines([raw[:raw.index("}, {") + 1]])
+        with patch("urllib.request.urlopen") as post:
+            response = post.return_value.__enter__.return_value
+            response.headers.get_content_type.return_value = "text/event-stream"
+            response.__iter__.side_effect = lambda: lines
+            first = []
+            with self.assertRaises(LLMError):
+                DeepSeekClient({"_api_key": "test"}).ask(None, "test", on_first=first.append)
+            self.assertEqual((len(first), post.call_count), (1, 1))
+
+    def test_segments_before_headlines(self):
+        answer = {"segments": ANSWER["segments"], "headline_en": "Test", "headline_zh": "测试"}
+        raw = json.dumps(answer)
+        first = []
+        result = DeepSeekClient._read_stream([*self.lines(raw), b"data: [DONE]"], first.append)
+        self.assertEqual(first[0]["segments"], ANSWER["segments"][:1])
+        self.assertEqual(json.loads(DeepSeekClient._extract_content(result)), answer)
+
+
+class VoiceTest(unittest.TestCase):
+    def test_italian_delivery_keeps_short_pickups_and_selects_separate_references(self):
+        import numpy as np
+        from unittest.mock import Mock
+
+        line = "Davvero, Dottore? Guarda la regina. La prossima mossa è mia!"
+        self.assertEqual(list(italian_beats("Il dott. Rossi conta 3.5 punti. Davvero?")),
+                         ["Il dott. Rossi conta 3.5 punti.", "Davvero?"])
+        model = Mock(sample_rate=24000)
+        model.generate.return_value = np.full(2400, .1, dtype=np.float32)
+        with patch("pet.neural_worker.pitch_stats", return_value=(14, 220)):
+            audio = render_italian(model, line, {"question": "q", "emphatic": "e", "prompt": "p"})
+        self.assertEqual([(c.args[0], c.kwargs["voice"]) for c in model.generate.call_args_list],
+                         [("Davvero, Dottore? Guarda la regina.", "q"), ("La prossima mossa è mia!", "e")])
+        self.assertGreater(len(audio), 4800)
+
+    def test_english_turns_pause_without_splitting_names_or_numbers(self):
+        self.assertEqual(english_beats("Ask Dr. Bell about 2–5 samples at 1.5 volts."),
+                         [("Ask Dr. Bell about 2–5 samples at 1.5 volts.", 0)])
+        beats = english_beats("Very subtle, Doctor. Nobody noticed, but I did.")
+        self.assertEqual([line for line, _ in beats], ["Very subtle, Doctor.", "Nobody noticed,", "but I did."])
+        self.assertGreater(beats[1][1], beats[0][1])
+
+    def test_original_recording_matches_the_whole_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            clip = folder / "greeting.wav"
+            clip.touch()
+            catalog = [{"file": clip.name, "text": "What's your plan?"}]
+            (folder / "original-en.json").write_text(json.dumps(catalog), encoding="utf-8")
+            self.assertEqual(original_recording("WHAT’S your plan!", folder, folder), clip)
+            self.assertIsNone(original_recording("What's your plan for today?", folder, folder))
+            clip.unlink()
+            self.assertIsNone(original_recording("What's your plan?", folder, folder))
+
+    def test_azure_request_and_ssml_escaping(self):
+        with patch.dict(os.environ, SPEECH_REGION="eastus", SPEECH_KEY="test"), patch("urllib.request.urlopen") as post:
+            post.return_value.__enter__.return_value.read.return_value = b"audio"
+            text = "Compare A & B when X < Y."
+            self.assertEqual(azure_audio(text, "en-US-JennyNeural", "+10%"), b"audio")
+            request = post.call_args.args[0]
+            self.assertEqual(request.full_url, "https://eastus.tts.speech.microsoft.com/cognitiveservices/v1")
+            headers = {key.lower(): value for key, value in request.header_items()}
+            self.assertEqual(headers["ocp-apim-subscription-key"], "test")
+            self.assertEqual(headers["x-microsoft-outputformat"], "riff-24khz-16bit-mono-pcm")
+            prosody = ET.fromstring(request.data).find(".//{*}prosody")
+            self.assertEqual((prosody.text, prosody.get("rate")), (text, "+10%"))
+
+
+class DesktopTest(unittest.TestCase):
+    """Real Tk selection and ImageGrab over a local solid-colour fixture."""
+
+    def setUp(self):
+        set_dpi_awareness()
+        cfg = copy.deepcopy(DEFAULTS)
+        cfg.update(_api_key="test", muted=True, save_history=False)
+        # Avoid taking over user hotkeys while exercising the dialog flow.
+        cfg["hotkeys"] = {key: f"ctrl+shift+f{n}" for n, key in enumerate(cfg["hotkeys"], 17)}
+        self.app = MochiApp(cfg)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.app.archive = ConversationHistory(Path(folder.name) / "history.sqlite3")
+        self.addCleanup(self.app.quit)
+        self.card = tk.Toplevel(self.app.root)
+        self.card.overrideredirect(True)
+        self.card.geometry("260x180+25+25")
+        self.card.configure(bg="#2255aa")
+        self.card.attributes("-topmost", True)
+        self.calls = []
+        self.gate = threading.Event()
+        self.gate.set()
+        self.addCleanup(self.gate.set)
+        self.app.client.ask = self.fake_model
+        self.app.speech.wait_timed = lambda text, stop: stop.wait(0.01)
+        self.app.root.update()
+
+    def fake_model(self, image, question, history, follow_up, on_first, context=None):
+        self.calls.append((image.copy(), question, history, follow_up))
+        on_first({**ANSWER, "segments": ANSWER["segments"][:1]})
+        self.gate.wait(3)
+        return ANSWER
+
+    def until(self, predicate, timeout=5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.root.update()
+            if predicate():
+                return
+            time.sleep(0.005)
+        self.fail("Timed out waiting for desktop state")
+
+    def select(self):
+        self.app._on_hotkey("capture")
+        self.until(lambda: self.app.selector and self.app.selector.canvas.winfo_ismapped())
+        canvas = self.app.selector.canvas
+        x = self.card.winfo_rootx() + 20 - canvas.winfo_rootx()
+        y = self.card.winfo_rooty() + 20 - canvas.winfo_rooty()
+        canvas.event_generate("<ButtonPress-1>", x=x, y=y)
+        canvas.event_generate("<B1-Motion>", x=x + 90, y=y + 60)
+        canvas.event_generate("<ButtonRelease-1>", x=x + 90, y=y + 60)
+        self.until(lambda: isinstance(self.app.dialog, CapturePreview))
+        self.assertEqual(self.app.dialog.source.size, (90, 60))
+        self.assertEqual(self.app.dialog.source.getpixel((45, 30)), (34, 85, 170))
+        return self.app.dialog
+
+    def test_ten_regions_and_followup(self):
+        self.select().cancel()
+        self.assertFalse(self.calls)
+        for i in range(10):
+            preview = self.select()
+            self.assertEqual(len(self.calls), i)
+            self.app.root.update_idletasks()
+            preview.canvas.event_generate("<ButtonPress-1>", x=45, y=30)
+            preview.canvas.event_generate("<ButtonRelease-1>", x=10, y=10)
+            preview.send()
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            image, _, history, follow_up = self.calls[-1]
+            self.assertFalse(history or follow_up)
+            self.assertEqual(image.getpixel((12, 12)), (0, 0, 0))
+            self.assertEqual(image.getpixel((50, 35)), (34, 85, 170))
+            self.assertEqual(len(self.app.transcript), 1)
+        self.app.show_input()
+        self.app._entry_clear_placeholder()
+        self.app.input_var.set("What colour remains?")
+        self.app.submit_input()
+        self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+        image, question, history, follow_up = self.calls[-1]
+        self.assertTrue(follow_up)
+        self.assertEqual((question, len(history)), ("What colour remains?", 2))
+        self.assertEqual(image.getpixel((12, 12)), (0, 0, 0))
+        self.assertEqual(len(self.app.transcript), 2)
+        self.app.show_transcript()
+        transcript = next(w for w in self.app.dialog.winfo_children() if isinstance(w, tk.Text))
+        self.assertIn(question, transcript.get("1.0", "end"))
+        self.app._close_dialog()
+        self.app.quit()
+        self.assertFalse(any(t.name in ("mochi-speech", "mochi-ask", "mochi-hotkeys") for t in threading.enumerate()))
+
+    def test_pet_only_until_requested_and_idle_close(self):
+        app = self.app
+        self.assertFalse(app.panel_open)
+        self.assertEqual(app.root.winfo_width(), app.PET_WIDTH)
+        start = (app.root.winfo_x(), app.root.winfo_y())
+        app.press_time = time.time()
+        app._pet_release(None)
+        app.root.update()
+        self.assertTrue(app.panel_open)
+        self.assertEqual(app.root.winfo_width(), app.W)
+        app.panel_active_at = time.monotonic() - 60
+        with patch.object(app.root, "winfo_pointerxy", return_value=(app.root.winfo_x()+210, app.root.winfo_y()+200)):
+            app._check_panel()
+        self.assertTrue(app.panel_open)
+        with patch.object(app.root, "winfo_pointerxy", return_value=(-10000, -10000)):
+            app.panel_active_at = time.monotonic() - 60
+            app._check_panel()
+        app.root.update()
+        self.assertFalse(app.panel_open)
+        self.assertEqual((app.root.winfo_x(), app.root.winfo_y()), start)
+        self.assertFalse(app.hidden)
+        self.assertFalse(app.talk_button.winfo_ismapped())
+        app._on_hotkey("ask")
+        app.root.update()
+        self.assertTrue(app.panel_open and app.entry.winfo_ismapped())
+        app._close_panel()
+        self.assertFalse(app.hidden or app.input_visible)
+
+    def test_two_line_captions_and_cancellation(self):
+        self.app._open_panel()
+        for line in ("Your move, Doctor. Shall we turn the next card together?",
+                     "Tocca a te, Dottore. Scopriamo insieme la prossima carta?"):
+            translation = "轮到你了，博士。一起翻开下一张牌吧？"
+            self.app._show_content(line, translation)
+            self.assertGreater(self.app.spoken_font.measure(line), 472)
+            if self.app.spoken_font.measure(line) <= self.app.subtitle_width:
+                self.assertEqual(self.app.pages, [(line, translation)])
+        spoken = "Davvero, Dottore? " + "Prima scegli una carta, poi vediamo chi ride. " * 6
+        chinese = "真的吗，博士？" + "先选张牌，再看看谁会笑到最后。" * 6
+        self.app._show_content(spoken, chinese, duration=0.4)
+        self.assertGreater(len(self.app.pages), 1)
+        self.until(lambda: self.app.page_index > 0)
+        for i in range(len(self.app.pages)):
+            self.app._step_page(i - self.app.page_index)
+            en = self.app.canvas.bbox(self.app.en_id)
+            zh = self.app.canvas.bbox(self.app.zh_id)
+            self.assertLess(en[3], zh[1])
+            self.assertLessEqual(max(en[2], zh[2]), self.app.CONTENT_X + self.app.subtitle_width + 2)
+        self.assertIsNone(self.app.page_timer)
+        self.app._show_content("Next.", "下一句。")
+        self.assertEqual(self.app.pages, [("Next.", "下一句。")])
+        self.assertEqual(self.app.canvas.itemcget(self.app.page_count_id, "state"), "hidden")
+
+    def test_browse_previous_conversation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConversationHistory(Path(tmp) / "history.sqlite3")
+            self.app.archive = store
+            self.app.cfg["save_history"] = True
+            image = Image.new("RGB", (32, 32))
+            self.app._send_capture(image)
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            first = self.app.topic
+            self.app._start_ask(image, "Earlier follow-up", follow_up=True)
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            self.app._send_capture(image)
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            self.app.show_history()
+            dlg = self.app.dialog
+            self.assertEqual(list(dlg.listing.get_children()), [self.app.topic, first])
+            dlg.query.set("earlier FOLLOW-UP")
+            self.assertEqual(dlg.listing.selection(), (first,))
+            self.assertIn("Earlier follow-up", dlg.detail.get("1.0", "end"))
+            self.assertIn(ANSWER["segments"][0]["zh"], dlg.detail.get("1.0", "end"))
+            with patch("pet.dialogs.messagebox.askyesno", return_value=True):
+                dlg.delete_selected()
+            self.assertFalse(dlg.listing.get_children())
+            self.app._close_dialog()
+            self.app.cfg["save_history"] = False
+            self.app._send_capture(image)
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            self.assertEqual(len(store.conversations()), 1)
+
+    def test_settings_selects_italian_text_voice_and_history(self):
+        with tempfile.TemporaryDirectory() as tmp, patch("pet.config.CONFIG_PATH", Path(tmp) / "config.json"):
+            self.app.show_settings()
+            self.app.dialog.fields["speech_language"].set("意大利语")
+            self.app.dialog.apply()
+            self.assertEqual(self.app.client.language, "it")
+            self.assertEqual(self.app.speech.language, "it")
+            saved = json.loads((Path(tmp) / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["speech_language"], "it")
+            answer = {"headline_it": "La luna", "headline_zh": "月亮",
+                      "segments": [{"it": "La luna riflette la luce del sole.", "zh": "月球反射阳光。"}]}
+            spoken = []
+
+            def fake_ask(image, question, history, follow_up, on_first):
+                on_first(answer)
+                return answer
+
+            def record_segment(text, stop, provider):
+                spoken.append(text)
+                return None, "muted"
+
+            self.app.client.ask = fake_ask
+            self.app.speech.prepare_segment = record_segment
+            self.app.speech.wait_timed = lambda *_: None
+            self.app._start_ask(None, "月光从哪来？", False)
+            self.until(lambda: not self.app.awaiting_answer and self.app.state == "idle")
+            self.assertEqual(spoken, [answer["segments"][0]["it"]])
+            self.assertEqual(self.app.canvas.itemcget(self.app.zh_id, "text"), answer["segments"][0]["zh"])
+            self.assertIn(spoken[0], self.app.transcript[-1])
+
+    def test_lapland_poses_follow_a_request(self):
+        entered = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def delayed_ask(*args, **kwargs):
+            entered.set()
+            release.wait(4)
+            return self.fake_model(*args, **kwargs)
+
+        self.app.client.ask = delayed_ask
+        self.gate.clear()
+        self.app._send_capture(Image.new("RGB", (32, 32)))
+        self.assertTrue(entered.wait(1))
+        self.assertEqual(self.app.pose, "curious")
+        for seconds, expected in [(1, "ponder"), (3, "wait"), (7, "impatient")]:
+            self.app.thinking_since = time.monotonic() - seconds
+            self.until(lambda: self.app.pose == expected)
+        release.set()
+        self.until(lambda: self.app.pose == "smile")
+        self.gate.set()
+        self.until(lambda: self.app.pose == "victory")
+        self.app._show_error("Unavailable", "暂时不可用")
+        self.assertEqual(self.app.pose, "flustered")
+        self.assertEqual(self.app.root.title(), "pet-Lapland")
+
+    def test_early_stop_and_settings(self):
+        self.gate.clear()
+        self.select().send()
+        self.until(lambda: self.app.stream_started)
+        self.assertTrue(self.app.awaiting_answer)
+        self.assertEqual(self.app.canvas.itemcget(self.app.zh_id, "text"), ANSWER["segments"][0]["zh"])
+        self.app.begin_capture()
+        self.assertFalse(self.app.capturing)
+        self.app.stop_speech()
+        self.gate.set()
+        self.until(lambda: not self.app.awaiting_answer)
+        self.assertIsNone(self.app.segment_queue)
+        self.assertEqual(self.app.state, "idle")
+        with tempfile.TemporaryDirectory() as tmp, patch("pet.config.CONFIG_PATH", Path(tmp) / "config.json"):
+            self.app.show_settings()
+            dialog = self.app.dialog
+            dialog.fields["capture"].set(dialog.fields["ask"].get())
+            dialog.apply()
+            self.assertTrue(dialog.error.cget("text"))
+            dialog.fields["capture"].set("ctrl+shift+f24")
+            dialog.fields["confirm_capture"].set(False)
+            dialog.fields["stream"].set(False)
+            dialog.fields["speech_provider"].set("edge")
+            dialog.apply()
+            saved = json.loads((Path(tmp) / "config.json").read_text(encoding="utf-8"))
+            self.assertNotIn("_api_key", saved)
+            self.assertFalse(self.app.client.stream or saved["confirm_capture"])
+            self.assertEqual(self.app.speech.provider, "edge")
+            self.assertEqual(self.app.hotkeys.bindings["capture"], "ctrl+shift+f24")
+            self.assertIn("Ctrl+Shift+F24", self.app.menu.entrycget(0, "label"))
+            self.app.client.ask = self.fake_model
+            with patch("pet.app.capture_region", return_value=Image.new("RGB", (32, 32))):
+                self.app._capture_done((0, 0, 32, 32))
+            self.until(lambda: not self.app.awaiting_answer)
+            self.assertIsNone(self.app.dialog)
+
+
+if __name__ == "__main__":
+    unittest.main()

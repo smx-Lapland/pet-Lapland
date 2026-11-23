@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+import re
+import json
+from contextlib import closing
+from pathlib import Path
+
+
+def token_estimate(text):
+    ascii_count = sum(c.isascii() for c in text)
+    return (ascii_count + 3) // 4 + len(text) - ascii_count
+
+
+def compact_turn(body, length):
+    question, _, rest = body.partition("\n\n")
+    if length is not None:
+        question, rest = body[:length], body[length:].lstrip("\n")
+    # Archive paragraphs contain spoken text followed by its Chinese translation.
+    paragraphs = rest.split("\n\n")
+    answer = " ".join(part.strip().rsplit("\n", 1)[-1] for part in (paragraphs[1:] or paragraphs) if part.strip())
+    return question, answer or rest
+
+
+class ConversationHistory:
+    """Store completed text turns separately from the model's active context."""
+
+    def __init__(self, path: Path | None = None):
+        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        self.path = path or local / "Mochi" / "history.sqlite3"
+
+    def _ensure_tables(self, db):
+        db.execute("""
+                CREATE TABLE IF NOT EXISTS turns (
+                    id INTEGER PRIMARY KEY, topic TEXT NOT NULL, title TEXT NOT NULL,
+                    body TEXT NOT NULL, created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        db.execute("CREATE INDEX IF NOT EXISTS turns_topic ON turns (topic, id)")
+        db.execute("CREATE TABLE IF NOT EXISTS memories (id INTEGER PRIMARY KEY, note TEXT NOT NULL UNIQUE)")
+        db.execute("""CREATE TABLE IF NOT EXISTS rollup (
+            id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER, through_id INTEGER, summary TEXT)""")
+        db.execute("INSERT OR IGNORE INTO rollup VALUES(1,0,0,'{}')")
+
+    def append(self, topic: str, title: str, body: str, question: str | None = None) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.path, timeout=3)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            self._ensure_tables(db)
+            if "question_len" not in {row[1] for row in db.execute("PRAGMA table_info(turns)")}:
+                db.execute("ALTER TABLE turns ADD COLUMN question_len INTEGER")
+            db.execute("INSERT INTO turns (topic, title, body, question_len) VALUES (?, ?, ?, ?)",
+                       (topic, title, body, len(question) if question is not None else None))
+
+    def recent_context(self):
+        if not self.path.is_file():
+            return None, [], []
+        with closing(sqlite3.connect(self.path, timeout=1)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(turns)")}
+            if not columns:
+                return None, [], []
+            size = "question_len" if "question_len" in columns else "NULL"
+            rows = db.execute(f"""SELECT topic, body, {size} FROM turns
+                WHERE topic=(SELECT topic FROM turns ORDER BY id DESC LIMIT 1)
+                ORDER BY id DESC LIMIT 3""").fetchall()
+        messages, transcript = [], []
+        for _, body, length in reversed(rows):
+            question, reply = compact_turn(body, length)
+            transcript.append(body)
+            if question and reply:
+                messages.extend([{"role": "user", "content": question}, {"role": "assistant", "content": reply}])
+        return rows[0][0] if rows else None, messages, transcript
+
+    def memories(self):
+        if not self.path.is_file():
+            return []
+        with closing(sqlite3.connect(self.path, timeout=1)) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='memories'").fetchone():
+                return []
+            return db.execute("SELECT id, note FROM memories ORDER BY id DESC").fetchall()
+
+    def relevant_notes(self, question):
+        def terms(text):
+            text = text.casefold()
+            return set(re.findall(r"[a-z0-9]+", text) + re.findall(r"(?=([\u3400-\u9fff]{2}))", text))
+        asked = terms(question)
+        rows = sorted(self.memories(), key=lambda r: len(terms(r[1]) & asked), reverse=True)
+        result, remaining = [], 480
+        for _, note in rows:
+            cost = token_estimate(note)
+            if cost <= remaining:
+                result.append(note)
+                remaining -= cost
+            elif not result:
+                result.append(note[:remaining] + "…")
+                break
+        return result
+
+    def remember(self, note):
+        note = note.strip()
+        if not note:
+            raise ValueError("请输入要记住的事项。")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(self.path, timeout=3)) as db, db:
+            self._ensure_tables(db)
+            db.execute("INSERT OR IGNORE INTO memories(note) VALUES (?)", (note,))
+
+    def forget(self, note_id):
+        with closing(sqlite3.connect(self.path, timeout=1)) as db, db:
+            db.execute("DELETE FROM memories WHERE id=?", (note_id,))
+
+    def handoff(self, topic, recent_count=3):
+        if not self.path.is_file():
+            return {}
+        with closing(sqlite3.connect(self.path, timeout=2)) as db:
+            db.execute("BEGIN")
+            columns = {r[1] for r in db.execute("PRAGMA table_info(turns)")}
+            if not columns:
+                return {}
+            checkpoint, summary = 0, "{}"
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='rollup'").fetchone():
+                checkpoint, summary = db.execute("SELECT through_id,summary FROM rollup WHERE id=1").fetchone()
+            size = "question_len" if "question_len" in columns else "NULL"
+            rows = db.execute(f"""SELECT body,{size} FROM turns WHERE id>? AND id NOT IN
+                (SELECT id FROM turns WHERE topic=? ORDER BY id DESC LIMIT ?) ORDER BY id DESC LIMIT 16""",
+                              (checkpoint, topic, recent_count))
+            pending, remaining = [], 850
+            for body, length in rows:
+                q, a = compact_turn(body, length)
+                item = q + "\n" + a
+                if token_estimate(item) > remaining:
+                    while item and token_estimate(item) > remaining:
+                        item = item[:max(0, int(len(item) * .8))]
+                    if item:
+                        pending.append(item + "…")
+                    break
+                pending.append(item)
+                remaining -= token_estimate(item)
+        return {k: v for k, v in (("交接摘要", json.loads(summary)), ("近期补充", pending[::-1])) if v}
+
+    def summary_batch(self):
+        """Return whole, previously unseen turns, keeping the latest three out of the rollup."""
+        with closing(sqlite3.connect(self.path, timeout=2)) as db:
+            db.execute("BEGIN")
+            revision, cursor, summary = db.execute("SELECT revision,through_id,summary FROM rollup WHERE id=1").fetchone()
+            rows = db.execute("""SELECT id,body,question_len FROM turns WHERE id>?
+                AND id < (SELECT id FROM turns ORDER BY id DESC LIMIT 1 OFFSET 2)
+                ORDER BY id LIMIT 32""", (cursor,))
+            batch, cost, full = [], 0, False
+            for row_id, body, length in rows:
+                q, a = compact_turn(body, length)
+                item = f"用户：{q}\n回答：{a}"
+                size = token_estimate(item)
+                if batch and cost + size > 2400:
+                    full = True
+                    break
+                batch.append((row_id, item))
+                cost += size
+        if batch and (full or cost >= 800 or len(batch) >= 6):
+            return revision, cursor, json.loads(summary), batch
+        return None
+
+    def commit_summary(self, revision, cursor, through, summary):
+        with closing(sqlite3.connect(self.path, timeout=3)) as db, db:
+            return db.execute("""UPDATE rollup SET revision=revision+1,through_id=?,summary=?
+                WHERE id=1 AND revision=? AND through_id=?""",
+                (through, json.dumps(summary, ensure_ascii=False), revision, cursor)).rowcount == 1
+
+    @staticmethod
+    def requested_note(text):
+        text = text.strip().strip("。.!！")
+        suffix = re.fullmatch(r"(.+?)[，,。；;！!]\s*(?:请|請|帮我|幫我)?(?:记住|記住)"
+                              r"(?:这个|這個|这件事|這件事|我的名字|我的偏好)?", text, re.S)
+        if suffix:
+            return suffix.group(1).strip()
+        match = re.fullmatch(
+            r"(?:请(?:你)?|請(?:你)?|帮我|幫我)?(?:记住|記住|记一下|記一下|记下来|記下來)"
+            r"[\s，,:：]*([^?？]+)|(?:please\s+)?remember\s+(?:that\s+)?([^?？]+)",
+            text, re.I | re.S)
+        if match:
+            return (match.group(1) or match.group(2)).strip(" ，,:：。.!！")
+        return None
+
+    def conversations(self, query: str = "") -> list[tuple]:
+        if not self.path.is_file():
+            return []
+        with closing(sqlite3.connect(self.path, timeout=1)) as db:
+            return db.execute("""
+                SELECT topics.topic, first.title, datetime(last.created, 'localtime')
+                FROM (
+                    SELECT topic, MIN(id) AS first_id, MAX(id) AS last_id
+                    FROM turns GROUP BY topic
+                    HAVING MAX(instr(lower(body), lower(?))) > 0
+                        OR MAX(instr(date(created, 'localtime'), ?)) > 0
+                ) topics
+                JOIN turns first ON first.id = topics.first_id
+                JOIN turns last ON last.id = topics.last_id
+                ORDER BY topics.last_id DESC
+            """, (query, query)).fetchall()
+
+    def turns(self, topic: str) -> list[tuple]:
+        with closing(sqlite3.connect(self.path, timeout=1)) as db:
+            return db.execute("""
+                SELECT datetime(created, 'localtime'), body FROM turns WHERE topic = ? ORDER BY id
+            """, (topic,)).fetchall()
+
+    def delete(self, topic: str) -> None:
+        with closing(sqlite3.connect(self.path, timeout=1)) as db, db:
+            self._ensure_tables(db)
+            db.execute("DELETE FROM turns WHERE topic = ?", (topic,))
+            db.execute("UPDATE rollup SET revision=revision+1, through_id=0, summary='{}' WHERE id=1")

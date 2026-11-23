@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+import uuid
+import wave
+from pathlib import Path
+from typing import Any
+
+from .config import CACHE_DIR
+
+log = logging.getLogger("mochi.speech")
+
+try:
+    import winsound
+except Exception:  # pragma: no cover - only on Windows
+    winsound = None
+
+CREATE_NO_WINDOW = 0x08000000
+
+
+class SpeechEngine:
+    def __init__(self, cfg: dict[str, Any], script_path: Path):
+        self.voice = str(cfg.get("voice", "Zira"))
+        self.provider = cfg.get("speech_provider", "lapland")
+        self.language = "it" if cfg.get("speech_language") == "it" else "en"
+        self.neural_voice = (cfg.get("neural_voice_it", "it-IT-ElsaNeural") if self.language == "it"
+                             else cfg.get("neural_voice", "en-US-JennyNeural"))
+        self.rate = int(cfg.get("rate", 0))
+        self.muted = bool(cfg.get("muted", False))
+        self.script_path = script_path
+        self._powershell = self._find_powershell()
+        self._play_lock = threading.Lock()
+
+    @staticmethod
+    def _find_powershell() -> str:
+        candidates = [
+            Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            Path(r"C:\Windows\System32\powershell.exe"),
+        ]
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        return "powershell.exe"
+
+    def stop(self) -> None:
+        if winsound is not None:
+            try:
+                with self._play_lock:
+                    winsound.PlaySound(None, 0)
+            except Exception:
+                pass
+
+    def prepare_segment(self, text, stop_event, provider):
+        if self.muted or stop_event.is_set():
+            return None, "muted"
+        if provider in ("azure", "edge", "lapland"):
+            path = CACHE_DIR / f"tts_{uuid.uuid4().hex}.wav"
+            job = {"path": str(path), "text": sanitize_for_tts(text, self.language), "rate": self.rate,
+                   "voice": self.neural_voice, "provider": provider, "language": self.language}
+            try:
+                # Spawn the interpreter directly so cancellation also terminates
+                # native inference on Windows, where a venv launcher is a parent process.
+                python = getattr(sys, "_base_executable", None) or sys.executable
+                env = {**os.environ, "__PYVENV_LAUNCHER__": sys.executable}
+                ok = run_worker([python, str(Path(__file__).with_name("neural_worker.py"))],
+                                stop_event, 90 if provider == "lapland" else 18,
+                                json.dumps(job).encode("utf-8"), env=env)
+                if ok and wav_duration(path) > 0:
+                    return path, provider
+            except (OSError, ValueError, EOFError, wave.Error):
+                pass
+            path.unlink(missing_ok=True)
+            if stop_event.is_set():
+                return None, "muted"
+            log.warning("%s voice unavailable, using SAPI", provider)
+        paths = self.synthesize([text], stop_event)
+        return (paths[0], "sapi") if paths else (None, "unavailable")
+
+    def synthesize(self, texts: list[str], stop_event=None) -> list[Path] | None:
+        texts = [t for t in texts if t.strip()]
+        stop_event = stop_event or threading.Event()
+        if not texts or self.muted or stop_event.is_set():
+            return None
+        job_id = uuid.uuid4().hex[:12]
+        paths = [CACHE_DIR / f"tts_{job_id}_{i}.wav" for i in range(len(texts))]
+        job_path = CACHE_DIR / f"tts_{job_id}.json"
+        result_path = CACHE_DIR / f"tts_{job_id}.result.json"
+        job = {
+            "voice": self.voice,
+            "language": self.language,
+            "rate": max(-10, min(10, self.rate)),
+            "items": [
+                {"text": sanitize_for_tts(text, self.language), "path": str(path)}
+                for text, path in zip(texts, paths)
+            ],
+        }
+        success = False
+        try:
+            job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+            ok = run_worker(
+                [
+                    self._powershell,
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(self.script_path),
+                    "-JobFile",
+                    str(job_path),
+                    "-ResultFile",
+                    str(result_path),
+                ],
+                stop_event, 30,
+            )
+            if result_path.exists():
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            else:
+                result = {}
+            if not ok or not result.get("ok"):
+                if not stop_event.is_set():
+                    log.warning("local voice unavailable")
+                return None
+            items = result.get("items") or []
+            if len(items) != len(texts) or any(not item.get("ok") for item in items):
+                log.warning("local voice failed to synthesize a segment")
+                return None
+            for path in paths:
+                if not path.exists() or path.stat().st_size < 1000:
+                    log.error("tts produced an empty file: %s", path)
+                    return None
+            success = True
+            return paths
+        except Exception:
+            log.exception("tts synthesis failed")
+            return None
+        finally:
+            for path in [job_path, result_path] + ([] if success else paths):
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def play_file(self, path: Path, stop_event) -> bool:
+        if self.muted or winsound is None:
+            return False
+        try:
+            duration = wav_duration(path)
+        except Exception:
+            duration = 4.0
+        try:
+            with self._play_lock:
+                if stop_event.is_set():
+                    return False
+                winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        except Exception:
+            log.exception("audio playback unavailable")
+            return False
+        stop_event.wait(duration + 0.05)
+        return True
+
+    def wait_timed(self, text: str, stop_event, duration: float | None = None) -> None:
+        stop_event.wait(subtitle_duration(text) if duration is None else duration)
+
+
+def subtitle_duration(text: str) -> float:
+    words = max(1, len(text.split()))
+    return min(14.0, max(2.8, words * 0.42 + 1.1))
+
+
+def run_worker(command, stop_event, timeout, data=None, env=None) -> bool:
+    if stop_event.is_set():
+        return False
+    with subprocess.Popen(command, stdin=subprocess.PIPE if data else subprocess.DEVNULL,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          creationflags=CREATE_NO_WINDOW, env=env) as proc:
+        try:
+            if data:
+                proc.stdin.write(data)
+                proc.stdin.close()
+            deadline = time.monotonic() + timeout
+            while proc.poll() is None:
+                if stop_event.wait(0.05) or time.monotonic() >= deadline:
+                    return False
+            return proc.returncode == 0
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+
+
+def wav_duration(path: Path) -> float:
+    with wave.open(str(path), "rb") as handle:
+        frames = handle.getnframes()
+        rate = handle.getframerate()
+        return frames / float(rate) if rate else 4.0
+
+
+def sanitize_for_tts(text: str, language: str = "en") -> str:
+    """Turn code-ish tokens into words a plain English voice can pronounce."""
+    text = str(text or "")
+    if language == "it":
+        return re.sub(r"\s+", " ", re.sub(r"[*_`#>\[\]{}|]+", " ", text)).strip()
+    text = re.sub(r"\bf-string\b", "F string", text, flags=re.I)
+    text = re.sub(r"\bTypeError\b", "type error", text)
+    text = re.sub(r"\bValueError\b", "value error", text)
+    text = re.sub(r"\bNone\b", "none", text)
+    text = re.sub(r"\bstr\b", "string", text)
+    text = re.sub(r"[*_`#>\[\]{}|]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text or "I found something worth a look."

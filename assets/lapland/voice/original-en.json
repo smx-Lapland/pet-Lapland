@@ -1,0 +1,177 @@
+[
+  {
+    "clip": "任命助理",
+    "file": "3.wav",
+    "text": "Ehi, Doctor. Hope you don't mind if I bring my weapons inside. I'll plop myself right over here."
+  },
+  {
+    "clip": "交谈1",
+    "file": "0.wav",
+    "text": "Somebody out to get you, huh? Then have a long, hard think about who you might've wronged in the past."
+  },
+  {
+    "clip": "交谈2",
+    "file": "1.wav",
+    "text": "If someone's out for revenge on you, don't hesitate, just take them out. Once you decide to pick up a weapon, you don't need a reason to kill."
+  },
+  {
+    "clip": "交谈3",
+    "file": "2.wav",
+    "text": "It's been a while... I see that Texas made some friends. Hehehe... Affascinante! Can't wait to get to know them!"
+  },
+  {
+    "clip": "晋升后交谈1",
+    "file": "晋升后交谈1.wav",
+    "text": "You think I'm an assassin, huh? Yeah, alright. Call me whatever you want. I can be anyone, do anything, kill anyone anytime. Just so long as I want to!"
+  },
+  {
+    "clip": "晋升后交谈2",
+    "file": "晋升后交谈2.wav",
+    "text": "I love power, Doctor. And you offered me a job where I can use my power to my heart's content... Love it. Honestly, the only joy I get out of this insane world is using my power to conquer it."
+  },
+  {
+    "clip": "信赖提升后交谈1",
+    "file": "信赖提升后交谈1.wav",
+    "text": "Texas? Ha, she's afraid of me, but I don't wanna do anything to her, except maybe try to bring back the old Texas. The one we got here's a cucciolo impaurito."
+  },
+  {
+    "clip": "信赖提升后交谈2",
+    "file": "信赖提升后交谈2.wav",
+    "text": "That red one... oh... Doctor, keep her away from me! She'd definitely kill me in a fight. But I have this feeling... this feeling... ugh, why do I want to fight her so badly?"
+  },
+  {
+    "clip": "信赖提升后交谈3",
+    "file": "信赖提升后交谈3.wav",
+    "text": "You want to know what happened between me and Texas? Hehe, you don't have a single idea of what you are sticking your nose into. You'll find out the truth someday, but not from me."
+  },
+  {
+    "clip": "闲置",
+    "file": "闲置.wav",
+    "text": "Sleep tight... enjoy your sweet dreams while you still can."
+  },
+  {
+    "clip": "干员报到",
+    "file": "干员报到.wav",
+    "text": "A great evil stands in the way of justice. My master, in the name of hatred and revenge, lead the weak onward!"
+  },
+  {
+    "clip": "观看作战记录",
+    "file": "观看作战记录.wav",
+    "text": "Don't you just love how I keep getting more and more powerful?"
+  },
+  {
+    "clip": "精英化晋升1",
+    "file": "精英化晋升1.wav",
+    "text": "Hahaha! Bene! I love how much you trust me. You can't say the same for Texas, right?"
+  },
+  {
+    "clip": "精英化晋升2",
+    "file": "精英化晋升2.wav",
+    "text": "Molto bene! That's more like it! Strength, unfettered and unchained! That's what I'm talking about!"
+  },
+  {
+    "clip": "编入队伍",
+    "file": "编入队伍.wav",
+    "text": "Make Texas the leader!"
+  },
+  {
+    "clip": "任命队长",
+    "file": "任命队长.wav",
+    "text": "Put Texas on my team!"
+  },
+  {
+    "clip": "行动出发",
+    "file": "行动出发.wav",
+    "text": "Haha, you people... I don't think I'll even remember your faces after this one... Anyway, let's just get started."
+  },
+  {
+    "clip": "行动开始",
+    "file": "行动开始.wav",
+    "text": "We're fighting you guys? Then please do your bestest job, or I'll be really bored."
+  },
+  {
+    "clip": "选中干员1",
+    "file": "选中干员1.wav",
+    "text": "Show me what you've got."
+  },
+  {
+    "clip": "选中干员2",
+    "file": "选中干员2.wav",
+    "text": "Tell me, what's your plan?"
+  },
+  {
+    "clip": "部署1",
+    "file": "部署1.wav",
+    "text": "Solid positioning."
+  },
+  {
+    "clip": "部署2",
+    "file": "部署2.wav",
+    "text": "Ahahaha!"
+  },
+  {
+    "clip": "作战中1",
+    "file": "作战中1.wav",
+    "text": "C'mon! C'eri quasi, tesoro!"
+  },
+  {
+    "clip": "作战中2",
+    "file": "作战中2.wav",
+    "text": "Can you do it?"
+  },
+  {
+    "clip": "作战中3",
+    "file": "作战中3.wav",
+    "text": "Just try me!"
+  },
+  {
+    "clip": "作战中4",
+    "file": "作战中4.wav",
+    "text": "You'll have to try harder than that!"
+  },
+  {
+    "clip": "完成高难行动",
+    "file": "完成高难行动.wav",
+    "text": "It's over? Ah, che noia!"
+  },
+  {
+    "clip": "3星结束行动",
+    "file": "3星结束行动.wav",
+    "text": "Hahaha, sliced 'em up like a millefoglie. How do you like it?"
+  },
+  {
+    "clip": "非3星结束行动",
+    "file": "非3星结束行动.wav",
+    "text": "Not my best work. You can lay it on me for letting a few get away."
+  },
+  {
+    "clip": "行动失败",
+    "file": "行动失败.wav",
+    "text": "Bravo! Now I want to crush them that much harder! Hahaha!"
+  },
+  {
+    "clip": "进驻设施",
+    "file": "进驻设施.wav",
+    "text": "Hm? Did I see a red shadow flash by?"
+  },
+  {
+    "clip": "戳一下",
+    "file": "戳一下.wav",
+    "text": "Haha!"
+  },
+  {
+    "clip": "信赖触摸",
+    "file": "信赖触摸.wav",
+    "text": "The more I get to know you, the better I understand Texas. I Love it."
+  },
+  {
+    "clip": "标题",
+    "file": "标题.wav",
+    "text": "Arknights."
+  },
+  {
+    "clip": "问候",
+    "file": "问候.wav",
+    "text": "Heh. Ciao, Doctor."
+  }
+]

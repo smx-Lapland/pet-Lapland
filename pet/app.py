@@ -1,0 +1,1356 @@
+from __future__ import annotations
+
+import json
+import logging
+import math
+import queue
+import re
+import sqlite3
+import threading
+import time
+import tkinter as tk
+from tkinter import font as tkfont
+import uuid
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, ImageTk
+
+from . import APP_NAME
+from .config import APP_DIR, CAPTURE_DIR, DEFAULTS, save_config
+from .dialogs import CapturePreview, HistoryDialog, MemoryDialog, SettingsDialog
+from .history import ConversationHistory
+from .hotkeys import HotkeyManager
+from .llm import DeepSeekClient, LLMError
+from .screen import (
+    RegionSelector,
+    capture_region,
+    save_debug_capture,
+    virtual_screen,
+    work_area,
+)
+from .speech import SpeechEngine, wav_duration, subtitle_duration
+from .subtitles import subtitle_pages
+from .voice_input import VoiceInput, VoiceInputError
+
+log = logging.getLogger("mochi.app")
+
+TRANSPARENT = "#010203"
+BUBBLE = "#25222B"
+BUBBLE_BORDER = "#665B67"
+BUBBLE_SHADOW = "#18151D"
+CREAM = "#FFF5E8"
+WHITE = "#FAF7F4"
+GOLD = "#E2C9AE"
+TEAL = "#DAC0B1"
+CONTROL = "#443B46"
+CORAL = "#FF8A7A"
+MUTED = "#CEC2CC"
+SPRITES = APP_DIR / "assets" / "lapland"
+
+DEFAULT_CAPTURE_QUESTION = "Explain what this is and what I should notice."
+
+
+def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, r: float, **kwargs):
+    points: list[float] = []
+    steps = 7
+    for cx, cy, start in (
+        (x2 - r, y1 + r, -90),
+        (x2 - r, y2 - r, 0),
+        (x1 + r, y2 - r, 90),
+        (x1 + r, y1 + r, 180),
+    ):
+        for index in range(steps + 1):
+            angle = math.radians(start + 90 * index / steps)
+            points.extend([cx + r * math.cos(angle), cy + r * math.sin(angle)])
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+def thinking_pose(elapsed: float) -> str:
+    if elapsed < 0.45:
+        return "curious"
+    if elapsed < 2.6:
+        return "ponder"
+    if elapsed < 6.0:
+        return "wait"
+    # A brief impatient reaction, followed by quieter pauses on long requests.
+    phase = (elapsed - 6.0) % 8.0
+    if phase < 1.5:
+        return "impatient"
+    return "ponder" if phase < 4.5 else "wait"
+
+
+class MochiApp:
+    W, H = 960, 430
+    PET_WIDTH = 167
+    PANEL_IDLE_SECONDS = 30
+    CONTENT_X = 198
+
+    @property
+    def subtitle_width(self):
+        return self.W - self.CONTENT_X - 50
+
+    def __init__(self, cfg: dict[str, Any], *, start_hidden: bool = False):
+        self.cfg = cfg
+        self.events: queue.Queue = queue.Queue()
+        self.client = DeepSeekClient(cfg)
+        self.speech = SpeechEngine(cfg, Path(__file__).with_name("tts_worker.ps1"))
+        self.voice_input = VoiceInput()
+        self.voice_turn: threading.Event | None = None
+
+        self.request_speech = self.speech
+        self.spoken_key = self.client.language
+        self.state = "idle"
+        self.last_image = None
+        self.last_answer: dict[str, Any] | None = None
+        self.history: list[dict[str, str]] = []
+        self.transcript: list[str] = []
+        self.archive = ConversationHistory()
+        self.topic = uuid.uuid4().hex
+        self.compaction_lock = threading.Lock()
+        if cfg["save_history"]:
+            try:
+                last_topic, self.history, self.transcript = self.archive.recent_context()
+                self.topic = last_topic or self.topic
+            except (OSError, sqlite3.Error):
+                log.warning("Could not resume saved conversation")
+        self.pending_question = ""
+        self.request_seq = 0
+        self.awaiting_answer = False
+        self.stream_started = False
+        self.segment_queue: queue.Queue | None = None
+        self.segment_index = 0
+        self.dialog: tk.Toplevel | None = None
+        self.speech_token = 0
+        self.speech_stop: threading.Event | None = None
+        self.capturing = False
+        self.closing = False
+        self.hidden = start_hidden
+        self.selector: RegionSelector | None = None
+        self.input_visible = False
+        self.drag_start: tuple[int, int] | None = None
+        self.drag_origin: tuple[int, int] | None = None
+        self.drag_moved = False
+        self.press_time = 0.0
+        self.pet_dy = 0.0
+        self.phase = 0.0
+        self.thinking_since = 0.0
+
+        self.root = tk.Tk()
+        self.panel_open = False
+        self.compact_position = None
+        self.panel_active_at = time.monotonic()
+        self.root.withdraw()
+        self.root.title(APP_NAME)
+        self.root.iconbitmap(default=str(SPRITES / "pet-Lapland.ico"))
+        self.root.overrideredirect(True)
+        self.root.resizable(False, False)
+        self.root.configure(bg=TRANSPARENT)
+        try:
+            self.root.attributes("-transparentcolor", TRANSPARENT)
+        except Exception:
+            log.warning("transparentcolor unavailable")
+        try:
+            self.root.attributes("-topmost", True)
+        except Exception:
+            pass
+        try:
+            self.root.attributes("-toolwindow", True)
+        except Exception:
+            pass
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+        self.root.bind("<Escape>", self._on_escape)
+
+        self._place_initial()
+        self.canvas = tk.Canvas(
+            self.root,
+            width=self.W,
+            height=self.H,
+            bg=TRANSPARENT,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.canvas.pack(fill="both", expand=True)
+
+        self._build_bubble()
+        self._build_input()
+        self._build_pet()
+        self._build_menu()
+        self._bind_events()
+        self._show_idle()
+        self.canvas.itemconfigure(self.tail_id, state="hidden")
+        if not self.client.available:
+            self.root.after(350, self._show_missing_key)
+
+        if not start_hidden:
+            self._restore_window()
+
+        self.hotkeys = HotkeyManager(self.cfg.get("hotkeys", {}), self.events)
+        self.hotkeys.start()
+
+        self.root.after(50, self._poll_events)
+        self.root.after(50, self._animate)
+        self.root.after(1000, self._check_panel)
+        log.info(
+            "%s started model=%s key_source=%s screen=%s",
+            APP_NAME,
+            self.cfg.get("model"),
+            self.cfg.get("_key_source"),
+            virtual_screen(),
+        )
+
+    # ---------- window ----------
+
+    def _place_initial(self) -> None:
+        saved = self.cfg.get("window") or {}
+        x, y = saved.get("x"), saved.get("y")
+        left, top, right, bottom = work_area()
+        self.W = min(self.W, max(720, right - left - 26))
+        if not isinstance(x, int) or not isinstance(y, int):
+            x = right - self.PET_WIDTH - 26
+            y = bottom - self.H - 18
+        vx, vy, vw, vh = virtual_screen()
+        x = max(vx, min(int(x), vx + vw - self.PET_WIDTH))
+        y = max(vy, min(int(y), vy + vh - self.H))
+        self.root.geometry(f"{self.PET_WIDTH}x{self.H}+{x}+{y}")
+
+    def _save_position(self) -> None:
+        self.root.update_idletasks()
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        self.cfg.setdefault("window", {})["x"] = int(x)
+        self.cfg["window"]["y"] = int(y)
+        try:
+            save_config(self.cfg)
+        except Exception:
+            log.exception("could not save window position")
+
+    def _restore_window(self) -> None:
+        self.root.deiconify()
+        try:
+            self.root.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+        self.root.lift()
+        try:
+            self.root.attributes("-topmost", True)
+        except Exception:
+            pass
+        self.hidden = False
+
+    def _hide_window(self) -> None:
+        self._close_panel()
+        self.root.withdraw()
+        self.hidden = True
+
+    def _toggle_window(self) -> None:
+        if self.capturing or self.dialog:
+            return
+        if self.hidden:
+            self._restore_window()
+        else:
+            self._hide_window()
+
+    def _open_panel(self):
+        self.panel_active_at = time.monotonic()
+        if not self.panel_open:
+            self.panel_open = True
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            self.compact_position = (x, y)
+            vx, _, vw, _ = virtual_screen()
+            x = max(vx, min(x, vx + vw - self.W))
+            self.root.geometry(f"{self.W}x{self.H}+{x}+{y}")
+            self.canvas.itemconfigure(self.tail_id, state="normal")
+            self.canvas.itemconfigure(self.talk_window, state="normal")
+
+    def _close_panel(self):
+        self._cancel_voice_input()
+        self.stop_speech()
+        self._set_input_visible(False)
+        if self.root.focus_get() in (self.entry, self.talk_button):
+            self.root.focus_set()
+        self.panel_open = False
+        self.canvas.itemconfigure(self.tail_id, state="hidden")
+        self.canvas.itemconfigure(self.talk_window, state="hidden")
+        geometry = f"{self.PET_WIDTH}x{self.H}"
+        if self.compact_position:
+            x, y = self.compact_position
+            geometry += f"+{x}+{y}"
+            self.compact_position = None
+        self.root.geometry(geometry)
+
+    def _check_panel(self):
+        if self.closing:
+            return
+        if self.panel_open and not self.hidden:
+            now = time.monotonic()
+            px, py = self.root.winfo_pointerxy()
+            x, y = px - self.root.winfo_rootx(), py - self.root.winfo_rooty()
+            reading = self.PET_WIDTH <= x < self.W and 0 <= y < self.H
+            busy = self.awaiting_answer or self.voice_turn or self.speech_stop or self.input_visible
+            if reading or busy or self.capturing or self.dialog:
+                self.panel_active_at = now
+            elif now - self.panel_active_at >= self.PANEL_IDLE_SECONDS:
+                self._close_panel()
+        self.root.after(1000, self._check_panel)
+
+    # ---------- static UI ----------
+
+    def _build_bubble(self) -> None:
+        c = self.canvas
+        right = self.W - 16
+        rounded_rect(c, 174, 16, right + 6, 422, 28, fill=BUBBLE_SHADOW, outline="")
+        self.tail_id = c.create_polygon(176, 258, 126, 288, 176, 318, fill=BUBBLE, outline="", smooth=True)
+        rounded_rect(c, 167, 7, right + 1, 415, 24, fill=BUBBLE_BORDER, outline="")
+        with Image.open(SPRITES / "dialog-skin.webp") as skin:
+            # Extend the dark part of the artwork while preserving the portrait and corners.
+            extra = right - 168 - skin.width
+            backdrop = Image.new("RGBA", (skin.width + extra, skin.height))
+            backdrop.paste(skin.crop((0, 0, 24, skin.height)), (0, 0))
+            shade = skin.crop((24, 0, 78, skin.height))
+            backdrop.paste(shade.resize((shade.width + extra, shade.height), Image.Resampling.BICUBIC), (24, 0))
+            backdrop.paste(skin.crop((78, 0, skin.width, skin.height)), (78 + extra, 0))
+            self.bubble_skin = ImageTk.PhotoImage(backdrop, master=self.root)
+        c.create_image(168, 8, anchor="nw", image=self.bubble_skin)
+
+        self.dot_id = c.create_oval(198, 33, 205, 40, fill=TEAL, outline="")
+        c.create_text(215, 36, text=APP_NAME, anchor="w", fill=CREAM, font=("Georgia", -16))
+        self.status_id = c.create_text(
+            320, 36, text="READY", anchor="w", fill=MUTED, font=("Segoe UI Semibold", -11)
+        )
+        self.counter_id = c.create_text(
+            right - 79, 35, text="", anchor="e", fill=WHITE, font=("Segoe UI Semibold", -13)
+        )
+        self.talk_button = tk.Button(self.root, text="按住说话", font=("Microsoft YaHei UI", -12),
+                                     bg=CONTROL, fg=CREAM, activebackground=TEAL, relief="flat",
+                                     bd=0, cursor="hand2", takefocus=False)
+        self.talk_window = c.create_window(right - 198, 35, window=self.talk_button, width=94, height=28,
+                                           state="hidden")
+        self.talk_button.bind("<ButtonPress-1>", self._press_to_talk)
+        self.talk_button.bind("<ButtonRelease-1>", self._release_to_talk)
+        self.talk_button.bind("<FocusOut>", lambda _: self._cancel_voice_input() if self.state == "listening" else None)
+        self.close_id = c.create_text(
+            right - 22, 33, text="×", anchor="center", fill=MUTED, font=("Segoe UI", -22)
+        )
+        close_hit = c.create_oval(right - 40, 18, right - 4, 52, fill=BUBBLE, outline="")
+        c.tag_lower(close_hit, self.close_id)
+        c.tag_bind(close_hit, "<Button-1>", lambda _e: self._close_panel())
+        c.tag_bind(self.close_id, "<Button-1>", lambda _e: self._close_panel())
+        c.tag_bind(self.close_id, "<Enter>", lambda _e: c.itemconfigure(self.close_id, fill=CORAL))
+        c.tag_bind(self.close_id, "<Leave>", lambda _e: c.itemconfigure(self.close_id, fill=MUTED))
+
+        self.title_font = tkfont.Font(root=self.root, family="Georgia", size=-29)
+        self.title_zh_font = tkfont.Font(root=self.root, family="Microsoft YaHei UI", size=-15)
+        self.spoken_font = tkfont.Font(root=self.root, family="Segoe UI Semibold", size=-22)
+        self.translation_font = tkfont.Font(root=self.root, family="Microsoft YaHei UI", size=-19)
+        self.headline_en_id = c.create_text(
+            self.CONTENT_X, 78, text="", anchor="nw", fill=CREAM, font=self.title_font,
+        )
+        self.headline_zh_id = c.create_text(
+            self.CONTENT_X, 122, text="", anchor="nw", fill=GOLD, font=self.title_zh_font,
+        )
+        self.en_id = c.create_text(
+            self.CONTENT_X, 199, text="", anchor="nw", fill=WHITE, font=self.spoken_font,
+        )
+        self.zh_id = c.create_text(
+            self.CONTENT_X, 241, text="", anchor="nw", fill=CREAM, font=self.translation_font,
+        )
+        c.create_line(self.CONTENT_X, 178, self.CONTENT_X + self.subtitle_width, 178, fill="#645863")
+        self.page_timer = None
+        self.page_index = 0
+        self.pages = [("", "")]
+        self.page_count_id = c.create_text(right - 84, 297, fill=MUTED, font=("Segoe UI", -12))
+        self.page_buttons = []
+        for x, step, symbol in [(right - 124, -1, "‹"), (right - 43, 1, "›")]:
+            tag = "page" + str(step)
+            hit = rounded_rect(c, x-14, 284, x+14, 310, 7, fill=CONTROL, outline="", tags=(tag,))
+            label = c.create_text(x, 296, text=symbol, fill=CREAM, font=("Georgia", -22), tags=(tag,))
+            c.tag_bind(tag, "<Button-1>", lambda _, delta=step: self._step_page(delta))
+            self.page_buttons.extend((hit, label))
+        self.hint_id = c.create_text(
+            198, 393, text="", anchor="w", fill=MUTED, font=("Microsoft YaHei UI", -12),
+        )
+
+    def _build_input(self) -> None:
+        c = self.canvas
+        right = self.W - 38
+        self.input_bg_id = rounded_rect(
+            c, 190, 330, right, 380, 13, fill="#27232C", outline="#796B78", width=1
+        )
+        self.ask_bg_id = rounded_rect(c, right - 65, 338, right - 8, 372, 9, fill=TEAL, outline="")
+        self.ask_text_id = c.create_text(
+            right - 36, 355, text="发送", fill="#251F26", font=("Microsoft YaHei UI", -14, "bold")
+        )
+        self.input_var = tk.StringVar()
+        self.entry = tk.Entry(
+            self.root,
+            textvariable=self.input_var,
+            bd=0,
+            relief="flat",
+            bg="#27232C",
+            fg=WHITE,
+            insertbackground=WHITE,
+            font=("Microsoft YaHei UI", -16),
+            highlightthickness=0,
+        )
+        self.entry_window_id = c.create_window(
+            206, 355, anchor="w", window=self.entry, width=right - 282, height=28
+        )
+        self.input_prompt_id = c.create_text(206, 355, anchor="w", text="输入想问拉普兰德的话…",
+                                             fill=MUTED, font=("Microsoft YaHei UI", -15))
+        self.input_shortcut_id = c.create_text(right - 17, 355, anchor="e", text=self._shortcut_text("Ctrl+Alt+Space"),
+                                               fill=MUTED, font=("Segoe UI", -12))
+        for item in (self.input_prompt_id, self.input_shortcut_id, self.input_bg_id):
+            c.tag_bind(item, "<Button-1>", lambda _e: self.show_input() if not self.input_visible else None)
+        self.entry.bind("<Return>", lambda _e: self.submit_input())
+        self.entry.bind("<FocusIn>", self._entry_focus_in)
+        self.entry.bind("<FocusOut>", self._entry_focus_out)
+        self.entry.bind("<KeyPress>", self._entry_keypress)
+        self.entry.bind("<Button-1>", self._entry_click)
+        c.tag_bind(self.ask_bg_id, "<Button-1>", lambda _e: self.submit_input())
+        c.tag_bind(self.ask_text_id, "<Button-1>", lambda _e: self.submit_input())
+        c.tag_bind(self.ask_bg_id, "<Enter>", lambda _e: c.itemconfigure(self.ask_bg_id, fill=CREAM))
+        c.tag_bind(self.ask_bg_id, "<Leave>", lambda _e: c.itemconfigure(self.ask_bg_id, fill=TEAL))
+        self._placeholder_active = False
+        self._set_input_visible(False)
+
+    def _build_pet(self) -> None:
+        c = self.canvas
+        self.poses = {}
+        for pose in ("curious", "ponder", "wait", "impatient", "smile", "victory", "flustered"):
+            with Image.open(SPRITES / f"{pose}.png") as sprite:
+                sprite.thumbnail((164, 130), Image.Resampling.LANCZOS)
+                # The Windows overlay uses a binary colour key. Low-opacity
+                # pixels would otherwise show up as dark specks on light desktops.
+                sprite.putalpha(sprite.getchannel("A").point(lambda a: 255 if a >= 96 else 0))
+                self.poses[pose] = ImageTk.PhotoImage(sprite, master=self.root)
+        self.pose = "wait"
+        self.pet_sprite = c.create_image(85, 348, anchor="s", image=self.poses[self.pose], tags=("pet",))
+        c.tag_bind("pet", "<ButtonPress-1>", self._pet_press)
+        c.tag_bind("pet", "<B1-Motion>", self._pet_drag)
+        c.tag_bind("pet", "<ButtonRelease-1>", self._pet_release)
+        c.tag_bind("pet", "<Button-3>", self._popup_menu)
+        c.tag_bind("pet", "<Enter>", lambda _e: c.configure(cursor="hand2"))
+        c.tag_bind("pet", "<Leave>", lambda _e: c.configure(cursor=""))
+
+    def _set_pose(self, pose: str) -> None:
+        if pose != self.pose:
+            self.canvas.itemconfigure(self.pet_sprite, image=self.poses[pose])
+            self.pose = pose
+
+    def _build_menu(self) -> None:
+        menu = tk.Menu(
+            self.root,
+            tearoff=0,
+            bg="#162033",
+            fg=WHITE,
+            activebackground="#2C3E5A",
+            activeforeground=CREAM,
+            bd=0,
+        )
+        menu.add_command(label=self._shortcut_text("Capture region   Ctrl+Alt+S"), command=self.begin_capture)
+        menu.add_command(label=self._shortcut_text("Ask about this screen   Ctrl+Alt+Space"), command=self.toggle_input)
+        menu.add_separator()
+        menu.add_command(label="Stop speaking", command=self.stop_speech)
+        self._mute_index = menu.index("end") + 1
+        menu.add_command(label=self._mute_label(), command=self.toggle_mute)
+        menu.add_command(label=self._shortcut_text(f"Hide {APP_NAME}   Ctrl+Alt+H"), command=self._hide_window)
+        menu.add_command(label="完整讲解记录", command=self.show_transcript)
+        menu.add_command(label="对话历史…", command=self.show_history)
+        menu.add_command(label="长期记忆…", command=self.show_memories)
+        menu.add_command(label="设置…", command=self.show_settings)
+        menu.add_separator()
+        menu.add_command(label=self._shortcut_text("Quit   Ctrl+Alt+Q"), command=self.quit)
+        self.menu = menu
+
+    def _shortcut_text(self, text):
+        # Replace in one pass so swapping two bindings also swaps their labels.
+        labels = {spec: self.cfg["hotkeys"][action].title()
+                  for action, spec in DEFAULTS["hotkeys"].items()}
+        return re.sub(r"Ctrl\+Alt\+(?:Space|S|H|Q)\b", lambda match: labels[match[0].lower()], text)
+
+    def _close_dialog(self):
+        if self.dialog:
+            self.dialog.destroy()
+            self.dialog = None
+
+    def show_settings(self):
+        if not self.dialog and not self.capturing:
+            self.dialog = SettingsDialog(self.root, self.cfg, self._save_settings, self._close_dialog)
+
+    def _save_settings(self, values):
+        changed_keys = values["hotkeys"] != self.cfg["hotkeys"]
+        cfg = {**self.cfg, **values}
+        save_config(cfg)
+        self.stop_speech()
+        self.cfg = cfg
+        self.client = DeepSeekClient(cfg)
+        self.speech = SpeechEngine(cfg, Path(__file__).with_name("tts_worker.ps1"))
+        if changed_keys:
+            self.hotkeys.stop()
+            self.hotkeys.join(timeout=1)
+            self.hotkeys = HotkeyManager(values["hotkeys"], self.events)
+            self.hotkeys.start()
+        self.menu.destroy()
+        self._build_menu()
+        self._close_dialog()
+        self.canvas.itemconfigure(self.input_shortcut_id, text=self._shortcut_text("Ctrl+Alt+Space"))
+        self._set_hint("Settings saved   ·   Ctrl+Alt+S capture   ·   Ctrl+Alt+Space ask")
+
+    def show_history(self):
+        if not self.dialog and not self.capturing:
+            self.dialog = HistoryDialog(self.root, self.archive, self._close_dialog, self._forget_topic)
+
+    def _forget_topic(self, topic):
+        if topic == self.topic:
+            self.request_seq += 1
+            self.awaiting_answer = False
+            self.stop_speech()
+            self.topic = uuid.uuid4().hex
+            self.history.clear()
+            self.transcript.clear()
+            self.last_image = self.last_answer = None
+            self._show_idle()
+
+    def show_memories(self):
+        if not self.dialog and not self.capturing:
+            self.dialog = MemoryDialog(self.root, self.archive, self._close_dialog)
+
+    def show_transcript(self):
+        if self.dialog or self.capturing:
+            return
+        dlg = self.dialog = tk.Toplevel(self.root)
+        dlg.title("当前选区 · 完整讲解记录")
+        dlg.transient(self.root)
+        dlg.attributes("-topmost", True)
+        transcript = tk.Text(dlg, width=68, height=24, wrap="word", padx=12, pady=10)
+        scroll = tk.Scrollbar(dlg, command=transcript.yview)
+        transcript.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        transcript.pack(expand=True, fill="both")
+        transcript.insert("end", "\n\n".join(self.transcript) or "完成一次讲解后，可在这里查看双语记录。")
+        transcript.configure(state="disabled")
+        dlg.protocol("WM_DELETE_WINDOW", self._close_dialog)
+        dlg.bind("<Escape>", lambda _: self._close_dialog())
+        dlg.grab_set()
+
+    def _mute_label(self) -> str:
+        return "Unmute voice" if self.speech.muted else "Mute voice"
+
+    def _bind_events(self) -> None:
+        self.canvas.bind("<Button-3>", self._popup_menu)
+        self.root.bind("<Control-Return>", lambda _e: self.submit_input())
+
+    # ---------- state / text ----------
+
+    def _set_text(self, item: int, text: str, y: int | None = None, x: int | None = None):
+        text = text or ""
+        if not text:
+            self.canvas.itemconfigure(item, text="", state="hidden")
+            return None
+        self.canvas.itemconfigure(item, text=text, state="normal")
+        if y is not None:
+            self.canvas.coords(item, x if x is not None else self.canvas.coords(item)[0], y)
+        return self.canvas.bbox(item)
+
+    def _show_content(self, en: str, zh: str, *, duration: float | None = None):
+        self._cancel_page_timer()
+        self.pages = subtitle_pages(en, zh, self.spoken_font, self.translation_font, self.subtitle_width)
+        self.page_index = 0
+        self._draw_page()
+        if duration and len(self.pages) > 1:
+            interval = max(1, round(duration * 1000 / len(self.pages)))
+            self.page_timer = self.root.after(interval, self._advance_page, interval)
+
+    def _draw_page(self):
+        en, zh = self.pages[self.page_index]
+        self._set_text(self.en_id, en)
+        self._set_text(self.zh_id, zh)
+        multi = len(self.pages) > 1
+        self._set_text(self.page_count_id, f"{self.page_index + 1} / {len(self.pages)}" if multi else "")
+        for item in self.page_buttons:
+            self.canvas.itemconfigure(item, state="normal" if multi else "hidden")
+
+    def _cancel_page_timer(self):
+        if self.page_timer is not None:
+            self.root.after_cancel(self.page_timer)
+            self.page_timer = None
+
+    def _advance_page(self, interval):
+        self.page_timer = None
+        self.page_index += 1
+        self._draw_page()
+        if self.page_index + 1 < len(self.pages):
+            self.page_timer = self.root.after(interval, self._advance_page, interval)
+
+    def _step_page(self, delta):
+        self._cancel_page_timer()
+        self.page_index = max(0, min(len(self.pages) - 1, self.page_index + delta))
+        self._draw_page()
+
+    def _set_status(self, text: str, color: str = TEAL) -> None:
+        self.canvas.itemconfigure(self.status_id, text=text)
+        self.canvas.itemconfigure(self.dot_id, fill=color)
+
+    def _set_hint(self, text: str) -> None:
+        self._set_text(self.hint_id, self._shortcut_text(text))
+
+    def _set_counter(self, text: str) -> None:
+        self.canvas.itemconfigure(self.counter_id, text=text)
+
+    def _show_idle(self) -> None:
+        self.state = "idle"
+        self._set_status("READY", TEAL)
+        self._set_headline("Hi, I'm Lapland.", "你好，我是拉普兰德。")
+        self._show_content(
+            "Hold to talk, or select part of your screen.",
+            "按住说话，或框选屏幕让我讲解。",
+        )
+        self._set_hint("Ctrl+Alt+S 框选   ·   右键查看对话历史")
+        self._set_counter("")
+
+    def _set_headline(self, en: str, zh: str) -> None:
+        for item, text, font in [(self.headline_en_id, en, self.title_font),
+                                 (self.headline_zh_id, zh, self.title_zh_font)]:
+            text = " ".join(text.split())
+            if font.measure(text) > 342:
+                while text and font.measure(text + "…") > 342:
+                    text = text[:-1]
+                text = text.rstrip() + "…"
+            self._set_text(item, text)
+
+    def _show_missing_key(self) -> None:
+        self.state = "error"
+        self._set_pose("flustered")
+        self._set_status("NO KEY", CORAL)
+        self._set_headline("I need a key.", "我还差一把钥匙。")
+        self._show_content(
+            "Set DEEPSEEK_API_KEY, or sign in to DSH so I can borrow its DeepSeek key.",
+            "请设置 DEEPSEEK_API_KEY，或登录 DSH，让我复用它的 DeepSeek 密钥。",
+        )
+        self._set_hint("Right-click → Quit   ·   then set the key and start me again")
+        self._set_counter("")
+
+    def _show_thinking(self, follow_up: bool, has_image: bool) -> None:
+        self.state = "thinking"
+        self.thinking_since = time.monotonic()
+        self._set_pose("curious")
+        self.thinking_label = "LOOKING" if has_image else "THINKING"
+        self._set_status(self.thinking_label, GOLD)
+        if not has_image:
+            self._set_headline("I'm listening.", "我在听，博士。")
+            self._show_content("", self.pending_question)
+        elif follow_up:
+            self._set_headline("Good question.", "这个问题不错。")
+            self._show_content(
+                "I'm looking at the same region again, with your question in mind.",
+                "我正在结合你的问题，再看一遍刚才的区域。",
+            )
+        else:
+            self._set_headline("Let me take a look.", "我看一眼。")
+            self._show_content(
+                "Reading the region you selected. This usually takes a few seconds.",
+                "正在读取你选中的区域，通常只需要几秒钟。",
+            )
+        self._set_hint("正在准备回答")
+        self._set_counter("")
+
+    def _show_error(self, en: str, zh: str) -> None:
+        self.state = "error"
+        self._set_pose("flustered")
+        self._set_status("HMM", CORAL)
+        self._set_headline("That didn't work.", "这次没成功。")
+        self._show_content(en, zh)
+        self._set_hint("Try again with Ctrl+Alt+S   ·   right-click for menu")
+        self._set_counter("")
+
+    # ---------- input ----------
+
+    def _press_to_talk(self, _event=None):
+        if self.hidden or self.capturing or self.dialog or self.closing or self.state == "listening":
+            return "break"
+        if not self.client.available:
+            self._show_missing_key()
+            return "break"
+        self._cancel_voice_input()
+        self.stop_speech()
+        self.request_seq += 1  # Ignore any outstanding streamed answer after an interruption.
+        self.awaiting_answer = False
+        self.stream_started = False
+        try:
+            self.voice_input.start()
+        except VoiceInputError as exc:
+            self._show_error("Microphone unavailable", str(exc))
+            return "break"
+        self.voice_turn = threading.Event()
+        self.talk_button.focus_set()
+        self.talk_button.grab_set()
+        self.talk_button.configure(text="松开发送", bg=CORAL)
+        self.state = "listening"
+        self._set_status("LISTENING", CORAL)
+        self._set_hint("正在听你说话 · 松开发送 · Esc 取消")
+        return "break"
+
+    def _release_to_talk(self, _event=None):
+        if self.state != "listening" or self.voice_turn is None:
+            return "break"
+        token = self.voice_turn
+        samples = self.voice_input.finish()
+        self.state = "transcribing"
+        self.talk_button.grab_release()
+        self.talk_button.configure(text="按住说话", bg=CONTROL)
+        self._set_status("TRANSCRIBING", GOLD)
+        self._set_hint("正在本机识别 · Esc 取消")
+        def decode():
+            try:
+                text = self.voice_input.transcribe(samples, token)
+            except Exception:
+                log.exception("voice transcription failed")
+                self.events.put(("voice_input", token, "", "本机语音识别失败，请检查识别模型或重新按住说话。"))
+            else:
+                self.events.put(("voice_input", token, text, ""))
+        threading.Thread(target=decode, daemon=True, name="lapland-transcribe").start()
+        return "break"
+
+    def _cancel_voice_input(self):
+        if self.voice_turn is None:
+            return
+        self.voice_turn.set()
+        self.voice_turn = None
+        if self.state == "listening":
+            self.voice_input.finish()
+            self.talk_button.grab_release()
+        self.talk_button.configure(text="按住说话", bg=CONTROL)
+        self.state = "idle"
+        self._set_status("READY", TEAL)
+        self._set_hint("已取消语音输入")
+
+    def _voice_result(self, token, text, error):
+        if token is not self.voice_turn or token.is_set() or self.closing:
+            return
+        self.voice_turn = None
+        if error:
+            self._show_error("Voice input unavailable", error)
+        elif not text:
+            self.state = "idle"
+            self._set_status("READY", TEAL)
+            self._set_hint("没听清。请按住说话，说完再松开。")
+        else:
+            self._start_ask(self.last_image, text, follow_up=self.last_image is not None)
+            if self.awaiting_answer:
+                self._show_content("", "你说：" + text)
+                self._set_hint("正在等拉普兰德回答")
+
+    def _set_input_visible(self, visible: bool) -> None:
+        state = "normal" if visible else "hidden"
+        for item in (
+            self.ask_bg_id, self.ask_text_id,
+            self.entry_window_id,
+        ):
+            self.canvas.itemconfigure(item, state=state)
+        for item in (self.input_prompt_id, self.input_shortcut_id):
+            self.canvas.itemconfigure(item, state="hidden" if visible else "normal")
+        if visible:
+            self.canvas.itemconfigure(self.hint_id, state="hidden")
+        self.input_visible = visible
+        if visible:
+            self._entry_show_placeholder()
+            self.root.after(20, self._focus_entry)
+        else:
+            self.canvas.itemconfigure(self.hint_id, state="normal")
+
+    def _entry_show_placeholder(self) -> None:
+        if self._placeholder_active:
+            return
+        if self.input_var.get().strip():
+            self._placeholder_active = False
+            return
+        self._placeholder_active = True
+        self.entry.configure(fg=MUTED)
+        self.entry.insert(0, "输入想问拉普兰德的话…")
+
+    def _entry_clear_placeholder(self) -> None:
+        if self._placeholder_active:
+            self._placeholder_active = False
+            self.entry.delete(0, "end")
+            self.entry.configure(fg=WHITE)
+
+    def _entry_focus_in(self, _event=None) -> None:
+        if self._placeholder_active:
+            self.entry.icursor("end")
+
+    def _entry_keypress(self, event):
+        if not self._placeholder_active:
+            return None
+        if event.keysym in (
+            "Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+            "Super_L", "Super_R", "Caps_Lock", "Num_Lock",
+        ):
+            return None
+        self._entry_clear_placeholder()
+        if event.keysym in ("BackSpace", "Delete", "Left", "Right", "Home", "End"):
+            return "break"
+        return None
+
+    def _entry_click(self, _event=None) -> None:
+        if self._placeholder_active:
+            self._entry_clear_placeholder()
+            self.root.after_idle(lambda: self.entry.icursor(0))
+
+    def _entry_focus_out(self, _event=None) -> None:
+        if self.input_visible and not self.input_var.get().strip():
+            self._entry_show_placeholder()
+
+    def _focus_entry(self) -> None:
+        if self.state == "listening" or not self.input_visible:
+            return
+        try:
+            self.root.focus_force()
+            self.entry.focus_force()
+            self.entry.icursor("end")
+        except Exception:
+            pass
+
+    def show_input(self) -> None:
+        if self.capturing or self.dialog:
+            return
+        self._restore_window()
+        self._open_panel()
+        if self.awaiting_answer:
+            return
+        if not self.client.available:
+            self._show_missing_key()
+            return
+        self._cancel_voice_input()
+        log.info("show input")
+        self.stop_speech()
+        self._set_input_visible(True)
+        if self.state != "thinking":
+            self._set_pose("curious")
+            self._set_status("ASK", TEAL)
+        self._set_hint("Enter to ask   ·   Esc to close")
+        self._set_counter("")
+
+    def hide_input(self) -> None:
+        self._cancel_voice_input()
+        if self.input_visible:
+            log.info("hide input")
+            if self.state == "idle":
+                self._set_pose("wait")
+                self._set_status("READY", TEAL)
+        self._set_input_visible(False)
+        self._entry_clear_placeholder()
+        self.input_var.set("")
+        if self.state == "speaking":
+            self._set_hint("Click me to stop   ·   Ctrl+Alt+S for a new capture")
+        elif self.state == "thinking":
+            self._set_hint("Only this region is sent to the model   ·   Esc stops the voice")
+        elif self.state == "error":
+            self._set_hint("Try again with Ctrl+Alt+S   ·   right-click for menu")
+        else:
+            self._set_hint("Ctrl+Alt+S capture   ·   Ctrl+Alt+Space ask   ·   right-click for menu")
+
+    def toggle_input(self) -> None:
+        if self.input_visible:
+            self.hide_input()
+        else:
+            self.show_input()
+
+    def submit_input(self) -> None:
+        if not self.input_visible or self._placeholder_active or self.state == "thinking":
+            return
+        text = self.input_var.get().strip()
+        if not text:
+            return
+        self.input_var.set("")
+        self.hide_input()
+        self.stop_speech()
+        if self.last_image is not None:
+            self._start_ask(self.last_image, text, follow_up=True)
+        else:
+            self._start_ask(None, text, follow_up=False)
+
+    # ---------- capture ----------
+
+    def begin_capture(self) -> None:
+        if self.capturing or self.awaiting_answer or self.dialog:
+            return
+        if not self.client.available:
+            self._restore_window()
+            self._open_panel()
+            self._show_missing_key()
+            return
+        self._cancel_voice_input()
+        self.capturing = True
+        self.stop_speech()
+        self.hide_input()
+        # Do not withdraw the root: a withdrawn Tk root also hides its
+        # overrideredirect Toplevel on Windows. An alpha-zero window is still
+        # mapped, so it will not appear in the screenshot, while the selector
+        # can be mapped above the desktop.
+        try:
+            self.root.attributes("-alpha", 0.0)
+            self.root.deiconify()
+        except Exception:
+            self.root.withdraw()
+        self.root.after(160, self._open_selector)
+
+    def _open_selector(self) -> None:
+        try:
+            self.selector = RegionSelector(
+                self.root,
+                on_done=self._capture_done,
+                on_cancel=self._capture_cancel,
+            )
+            self.selector.start()
+        except Exception:
+            log.exception("could not open selector")
+            if self.selector:
+                self.selector._destroy()
+                self.selector = None
+            self.capturing = False
+            self._restore_window()
+            self._open_panel()
+            self._show_error("I couldn't open the screenshot overlay.", "我打不开截屏选择层。")
+
+    def _capture_done(self, bbox: tuple[int, int, int, int]) -> None:
+        self.selector = None
+        try:
+            image = capture_region(bbox)
+        except Exception:
+            log.exception("capture failed")
+            self.capturing = False
+            self._restore_window()
+            self._open_panel()
+            self._show_error("I couldn't capture that region.", "我没能截取这个区域。")
+            return
+        if image.width < 16 or image.height < 16:
+            self.capturing = False
+            self._restore_window()
+            self._open_panel()
+            self._show_error("That region was too small to read.", "这个区域太小了，读不清。")
+            return
+        self._restore_window()
+        if self.cfg.get("confirm_capture", True):
+            self.dialog = CapturePreview(self.root, image, self.client.base, self._send_capture, self._capture_cancel)
+        else:
+            self._send_capture(image)
+
+    def _send_capture(self, image) -> None:
+        self.dialog = None
+        self.capturing = False
+        if self.cfg.get("save_captures"):
+            try:
+                save_debug_capture(image, CAPTURE_DIR)
+            except Exception:
+                log.exception("could not save debug capture")
+        self._restore_window()
+        self.hide_input()
+        self.last_image = image
+        self.last_answer = None
+        self.history = []
+        self.transcript.clear()
+        self.topic = uuid.uuid4().hex
+        self._start_ask(image, DEFAULT_CAPTURE_QUESTION, follow_up=False)
+
+    def _capture_cancel(self) -> None:
+        self.dialog = None
+        self.selector = None
+        self.capturing = False
+        self._restore_window()
+
+    # ---------- model ----------
+
+    def _start_ask(self, image, question: str, follow_up: bool) -> None:
+        self._open_panel()
+        self._cancel_voice_input()
+        self.request_seq += 1
+        seq = self.request_seq
+        self.pending_question = question
+        self.request_speech = self.speech
+        self.spoken_key = self.client.language
+        note = self.archive.requested_note(question)
+        if note:
+            self.hide_input()
+            try:
+                self.archive.remember(note)
+            except (OSError, ValueError, sqlite3.Error):
+                self._show_error("Memory unavailable", "这条记忆没能保存，请检查本地数据目录。")
+                return
+            self.awaiting_answer = False
+            acknowledgement = "Me lo ricorderò." if self.spoken_key == "it" else "I'll remember that."
+            answer = {"headline_" + self.spoken_key: acknowledgement, "headline_zh":"已记住",
+                      "segments":[{self.spoken_key:acknowledgement, "zh":"已记住：" + note}]}
+            self._begin_segments(answer)
+            if self.segment_queue is not None:
+                self.segment_queue.put(None)
+            return
+        self.awaiting_answer = True
+        self.stream_started = False
+        history = list(self.history)
+        try:
+            context = self.archive.handoff(self.topic, len(history)//2) if self.cfg["save_history"] else {}
+            notes = self.archive.relevant_notes(question)
+            if notes:
+                context["用户指定的长期记忆"] = notes
+        except (OSError, sqlite3.Error, ValueError):
+            context = {}
+            log.warning("Could not load conversation memory")
+        self.hide_input()
+        self._show_thinking(follow_up, image is not None)
+        threading.Thread(
+            target=self._ask_worker,
+            args=(self.client, image, question, history, seq, follow_up, context),
+            daemon=True,
+            name="mochi-ask",
+        ).start()
+
+    def _ask_worker(self, client, image, question: str, history: list[dict[str, str]], seq: int, follow_up: bool, context=None) -> None:
+        try:
+            answer = client.ask(image, question, history=history, follow_up=follow_up,
+                                     on_first=lambda first: self.events.put(("first", seq, first)),
+                                     **({"context": context} if context else {}))
+        except LLMError as exc:
+            self.events.put(("error", seq, exc.en, exc.zh))
+        except Exception:
+            log.exception("unexpected ask failure")
+            self.events.put(("error", seq, "Something went wrong on my side.", "我这边出了点问题。"))
+        else:
+            self.events.put(("answer", seq, answer))
+
+    def _begin_segments(self, answer: dict[str, Any]) -> None:
+        self.last_answer = answer
+        if self.hidden or not self.panel_open:
+            return
+        self.state = "speaking"
+        self._set_pose("smile")
+        self._set_status("PREPARING VOICE", GOLD)
+        segments = answer["segments"]
+        first = segments[0]
+        self._set_headline(answer["headline_" + self.spoken_key], answer["headline_zh"])
+        self._show_content(first[self.spoken_key], first["zh"])
+        self.segment_index = 0
+        self._set_counter("1 / …" if self.awaiting_answer else f"1 / {len(segments)}")
+        self._set_hint("点角色停止朗读   ·   Ctrl+Alt+S 框选")
+
+        self.speech_token += 1
+        token = self.speech_token
+        self.speech_stop = threading.Event()
+        self.segment_queue = queue.Queue()
+        self.segment_queue.put((0, first))
+        threading.Thread(
+            target=self._speech_worker,
+            args=(self.segment_queue, self.request_seq, token, self.speech_stop, self.request_speech),
+            daemon=False,  # On exit, let the cancelled worker reap its child and delete its WAV.
+            name="mochi-speech",
+        ).start()
+
+    def _on_answer(self, seq: int, answer: dict[str, Any]) -> None:
+        if seq != self.request_seq:
+            return
+        self.awaiting_answer = False
+        if not self.stream_started:
+            self._begin_segments(answer)
+        self.last_answer = answer
+        self.history.extend([
+            {"role": "user", "content": self.pending_question},
+            {"role": "assistant", "content": " ".join(s["zh"] or s[self.spoken_key] for s in answer["segments"])},
+        ])
+        self.history = self.history[-6:]
+        lines = [self.pending_question, answer["headline_" + self.spoken_key] + " · " + answer["headline_zh"]]
+        lines.extend(segment[self.spoken_key] + "\n" + segment["zh"] for segment in answer["segments"])
+        body = "\n\n".join(lines)
+        self.transcript.append(body)
+        if self.cfg["save_history"]:
+            try:
+                self.archive.append(self.topic, answer["headline_zh"] or answer["headline_" + self.spoken_key],
+                                    body, self.pending_question)
+            except (OSError, sqlite3.Error) as exc:
+                log.warning("could not save conversation (%s)", type(exc).__name__)
+                self._set_hint("本轮未能保存，可从「完整讲解记录」复制")
+            else:
+                if self.compaction_lock.acquire(blocking=False):
+                    threading.Thread(target=self._compact_history, args=(self.client,), daemon=True,
+                                     name="lapland-memory").start()
+                if isinstance(self.dialog, HistoryDialog):
+                    self.dialog.refresh()
+        self._set_headline(answer["headline_" + self.spoken_key], answer["headline_zh"])
+        if self.segment_queue is not None:
+            segments = answer["segments"]
+            self._set_counter(f"{self.segment_index + 1} / {len(segments)}")
+            for index, segment in enumerate(segments[1:], start=1):
+                self.segment_queue.put((index, segment))
+            self.segment_queue.put(None)
+        elif self.hidden or not self.panel_open or self.state == "thinking":
+            self.state = "idle"
+            self._set_pose("victory")
+            self._set_status("READY", TEAL)
+            self._show_content(answer["segments"][0][self.spoken_key], answer["segments"][0]["zh"])
+            self._set_hint("Ctrl+Alt+Space to ask a follow-up")
+
+    def _compact_history(self, client):
+        try:
+            while self.cfg["save_history"] and not self.closing:
+                pending = self.archive.summary_batch()
+                if not pending:
+                    break
+                revision, cursor, summary, rows = pending
+                text = "\n\n".join(part for _, part in rows)
+                # Oversized individual turns are processed completely before advancing the cursor.
+                for offset in range(0, len(text), 8000):
+                    if self.closing or not self.cfg["save_history"]:
+                        return
+                    summary = client.summarize(summary, text[offset:offset + 8000])
+                if not self.archive.commit_summary(revision, cursor, rows[-1][0], summary):
+                    break
+        except Exception as exc:
+            log.warning("Summary deferred (%s)", type(exc).__name__)
+        finally:
+            self.compaction_lock.release()
+
+    def _speech_worker(self, items, seq, token, stop_event, speech) -> None:
+        provider = speech.provider
+        while not stop_event.is_set():
+            try:
+                item = items.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            index, segment = item
+            path = None
+            try:
+                path, used = speech.prepare_segment(segment[speech.language], stop_event, provider)
+                if used == "sapi":
+                    provider = "sapi"
+                duration = wav_duration(path) if path else subtitle_duration(segment[speech.language])
+                self.events.put(("segment", seq, token, index, used, duration))
+                if path and speech.play_file(path, stop_event):
+                    continue
+                if path:
+                    self.events.put(("segment", seq, token, index, "unavailable"))
+            except Exception as exc:
+                log.warning("voice unavailable (%s)", type(exc).__name__)
+                self.events.put(("segment", seq, token, index, "unavailable"))
+            finally:
+                if path:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        log.warning("could not remove temporary audio")
+            speech.wait_timed(segment[speech.language], stop_event)
+        if not stop_event.is_set():
+            self.events.put(("speech_done", seq, token))
+
+    def _on_segment(self, seq: int, token: int, index: int, used: str, duration=None) -> None:
+        if seq != self.request_seq or token != self.speech_token or not self.last_answer:
+            return
+        segments = self.last_answer["segments"]
+        if index >= len(segments):
+            return
+        segment = segments[index]
+        self._show_content(segment[self.spoken_key], segment["zh"],
+                           duration=duration or subtitle_duration(segment[self.spoken_key]))
+        self.segment_index = index
+        self._set_counter(f"{index + 1} / {'…' if self.awaiting_answer else len(segments)}")
+        voiced = used not in ("muted", "unavailable")
+        self._set_status("SPEAKING" if voiced else "SUBTITLES", CORAL if voiced else TEAL)
+        if not voiced and not self.speech.muted:
+            self._set_hint("Audio unavailable · 语音不可用，继续显示字幕")
+        elif used == "sapi" and self.speech.provider != "sapi":
+            self._set_hint("已切换至所选语言的系统语音")
+
+    def _on_speech_done(self, seq: int, token: int) -> None:
+        if seq != self.request_seq or token != self.speech_token:
+            return
+        self.speech_stop = None
+        self.segment_queue = None
+        self._set_pose("victory")
+        self.state = "idle"
+        self._set_status("READY", TEAL)
+        self._set_hint("Ctrl+Alt+S 框选   ·   右键查看对话历史")
+        self._set_counter("")
+
+    def stop_speech(self) -> None:
+        self._cancel_page_timer()
+        self.segment_queue = None
+        if self.speech_stop is not None:
+            self.speech_stop.set()
+        self.speech.stop()
+        self.speech_token += 1
+        self.speech_stop = None
+        if self.state == "speaking":
+            self._set_pose("wait")
+            self.state = "idle"
+            self._set_status("READY", TEAL)
+            self._set_hint("Ctrl+Alt+Space to ask a follow-up   ·   Ctrl+Alt+S for a new region")
+            self._set_counter("")
+
+    def toggle_mute(self) -> None:
+        self.stop_speech()
+        self.speech.muted = not self.speech.muted
+        self.cfg["muted"] = self.speech.muted
+        save_config(self.cfg)
+        try:
+            self.menu.entryconfigure(self._mute_index, label=self._mute_label())
+        except Exception:
+            pass
+        if self.speech.muted:
+            self._set_hint("Voice muted   ·   Ctrl+Alt+S capture   ·   right-click → Unmute")
+        else:
+            self._set_hint("Voice on   ·   Ctrl+Alt+S capture   ·   right-click → Mute")
+
+    # ---------- events ----------
+
+    def _poll_events(self) -> None:
+        if self.closing:
+            return
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._handle_event(event)
+                if self.closing:
+                    return
+            except Exception:
+                log.exception("event handler failed: %r", event[:2] if isinstance(event, tuple) else event)
+        self.root.after(50, self._poll_events)
+
+    def _handle_event(self, event: tuple) -> None:
+        kind = event[0]
+        if kind == "voice_input":
+            self._voice_result(*event[1:])
+        elif kind == "hotkey":
+            self._on_hotkey(event[1])
+        elif kind == "hotkey_error":
+            log.warning("hotkey unavailable: %s", event)
+            self._set_hint(f"{event[2]} is unavailable ({event[3]})   ·   use right-click → Capture")
+        elif kind == "answer":
+            self._on_answer(event[1], event[2])
+        elif kind == "first":
+            if event[1] == self.request_seq and self.awaiting_answer and not self.stream_started:
+                self.stream_started = True
+                self._begin_segments(event[2])
+        elif kind == "error":
+            if event[1] == self.request_seq:
+                self.awaiting_answer = False
+                self.stop_speech()
+                self._show_error(event[2], event[3])
+        elif kind == "segment":
+            self._on_segment(*event[1:])
+        elif kind == "speech_done":
+            self._on_speech_done(event[1], event[2])
+
+    def _on_hotkey(self, action: str) -> None:
+        log.info("hotkey action=%s", action)
+        if action == "capture":
+            self.begin_capture()
+        elif action == "ask":
+            self.toggle_input()
+        elif action == "toggle":
+            self._toggle_window()
+        elif action == "quit":
+            self.quit()
+
+    def _on_escape(self, _event=None) -> None:
+        if self.voice_turn is not None:
+            self._cancel_voice_input()
+        elif self.input_visible:
+            self.hide_input()
+        elif self.panel_open and self.state not in ("speaking", "thinking"):
+            self._close_panel()
+        else:
+            self.stop_speech()
+
+    def _popup_menu(self, event) -> None:
+        self._cancel_voice_input()
+        try:
+            self.menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.menu.grab_release()
+
+    # ---------- pet interaction ----------
+
+    def _pet_press(self, event) -> None:
+        self.drag_start = (int(event.x_root), int(event.y_root))
+        self.drag_origin = (self.root.winfo_x(), self.root.winfo_y())
+        self.drag_moved = False
+        self.press_time = time.time()
+
+    def _pet_drag(self, event) -> None:
+        if not self.drag_start or not self.drag_origin:
+            return
+        dx = int(event.x_root) - self.drag_start[0]
+        dy = int(event.y_root) - self.drag_start[1]
+        if abs(dx) + abs(dy) > 4:
+            self.drag_moved = True
+            self.compact_position = None
+        vx, vy, vw, vh = virtual_screen()
+        width = self.W if self.panel_open else self.PET_WIDTH
+        x = max(vx, min(self.drag_origin[0] + dx, vx + vw - width))
+        y = max(vy, min(self.drag_origin[1] + dy, vy + vh - self.H))
+        self.root.geometry(f"+{x}+{y}")
+
+    def _pet_release(self, _event) -> None:
+        if self.drag_moved:
+            self._save_position()
+        elif time.time() - self.press_time < 0.5:
+            if self.state == "speaking":
+                self.stop_speech()
+            elif self.panel_open:
+                self._close_panel()
+            else:
+                self._open_panel()
+        self.drag_start = None
+        self.drag_origin = None
+
+    # ---------- animation ----------
+
+    def _animate(self) -> None:
+        if self.closing:
+            return
+        self.phase += 0.075
+        target = math.sin(self.phase) * 2.8
+        delta = target - self.pet_dy
+        if abs(delta) > 0.01:
+            self.canvas.move("pet", 0, delta)
+            self.pet_dy = target
+
+        if self.state == "thinking":
+            elapsed = time.monotonic() - self.thinking_since
+            self._set_pose(thinking_pose(elapsed))
+            self._set_status(self.thinking_label + "." * (int(elapsed * 2) % 4), GOLD)
+
+        self.root.after(50, self._animate)
+
+    # ---------- lifecycle ----------
+
+    def quit(self) -> None:
+        if self.closing:
+            return
+        self.closing = True
+        self._cancel_voice_input()
+        try:
+            if self.selector:
+                self.selector._destroy()
+        except Exception:
+            pass
+        self.stop_speech()
+        try:
+            self.hotkeys.stop()
+            self.hotkeys.join(timeout=1)
+        except Exception:
+            pass
+        try:
+            # This root owns its Tcl interpreter, including pending selector
+            # delays and animation callbacks that may outlive their widgets.
+            for timer in self.root.tk.splitlist(self.root.tk.call("after", "info")):
+                self.root.after_cancel(timer)
+            self.root.destroy()
+        except Exception:
+            pass
+        log.info("%s stopped", APP_NAME)
+
+    def run(self) -> None:
+        self.root.mainloop()

@@ -1,0 +1,10 @@
+__pycache__/
+.venv/
+models/
+*.py[cod]
+cache/
+captures/
+pet.log
+config.json
+assets/_*
+_*

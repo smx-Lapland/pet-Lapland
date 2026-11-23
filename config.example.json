@@ -1,0 +1,28 @@
+{
+  "model": "deepseek-flash",
+  "api_base": "https://api.deepseek.com",
+  "voice": "Zira",
+  "speech_provider": "lapland",
+  "speech_language": "en",
+  "neural_voice": "en-US-JennyNeural",
+  "neural_voice_it": "it-IT-ElsaNeural",
+  "confirm_capture": true,
+  "stream": true,
+  "rate": 0,
+  "muted": false,
+  "max_image_side": 1600,
+  "jpeg_quality": 88,
+  "save_captures": false,
+  "save_history": true,
+  "reasoning_effort": "low",
+  "hotkeys": {
+    "capture": "ctrl+alt+s",
+    "ask": "ctrl+alt+space",
+    "toggle": "ctrl+alt+h",
+    "quit": "ctrl+alt+q"
+  },
+  "window": {
+    "x": null,
+    "y": null
+  }
+}
