@@ -1,6 +1,9 @@
 import copy
+import gc
 import json
 import os
+import queue
+import sys
 import tempfile
 import threading
 import time
@@ -82,6 +85,98 @@ class StreamTest(unittest.TestCase):
 
 
 class VoiceTest(unittest.TestCase):
+    def test_failed_gpu_retries_same_voice_on_cpu(self):
+        import wave
+        from pet.speech import SpeechEngine
+
+        attempts = []
+        def render(_command, _stop, _timeout, data, env):
+            job = json.loads(data)
+            attempts.append((env["PET_TTS_DEVICE"], job["provider"], job["language"], job["emotion"]))
+            if env["PET_TTS_DEVICE"] == "cuda":
+                return False
+            with wave.open(job["path"], "wb") as out:
+                out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                out.writeframes(bytes(3200))
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp, patch("pet.speech.CACHE_DIR", Path(tmp)), \
+             patch("pet.speech.cuda_installed", return_value=True), patch("pet.speech.run_worker", side_effect=render):
+            engine = SpeechEngine({"speech_provider": "vits", "speech_language": "it"}, Path("unused"))
+            path, used = engine.prepare_segment("Ciao.", threading.Event(), "vits", "MOCKING")
+            self.assertEqual((used, engine.device), ("vits", "cpu"))
+            self.assertTrue(path.is_file())
+            self.assertEqual(attempts, [("cuda", "vits", "it", "MOCKING"), ("cpu", "vits", "it", "MOCKING")])
+
+    def test_cpu_setting_and_missing_gpu_keep_cpu_runtime(self):
+        from pet.speech import SpeechEngine
+        for installed, mode in ((True, "cpu"), (False, "auto")):
+            with patch("pet.speech.cuda_installed", return_value=installed):
+                engine = SpeechEngine({"voice_device": mode, "speech_provider": "vits"}, Path("unused"))
+                self.assertEqual(engine._neural_env()["PET_TTS_DEVICE"], "cpu")
+
+    def test_prepared_worker_stops_mid_segment_and_removes_pending_file(self):
+        from pet.speech import SpeechEngine
+        worker = ("import json, pathlib, sys, time\n"
+                  "job = json.loads(sys.stdin.buffer.readline())\n"
+                  "pathlib.Path(job['path'] + '.pending').touch()\n"
+                  "time.sleep(30)\n")
+        engine = SpeechEngine({"speech_provider": "vits"}, Path("unused"))
+        stop = threading.Event()
+        with tempfile.TemporaryDirectory() as tmp, patch("pet.speech.CACHE_DIR", Path(tmp)), \
+             patch.object(engine, "_neural_command", return_value=[sys._base_executable, "-c", worker]):
+            engine.warmup()
+            proc = engine._renderer
+            result = []
+            task = threading.Thread(target=lambda: result.append(engine.prepare_segment("test", stop, "vits")))
+            task.start()
+            try:
+                deadline = time.monotonic() + 3
+                while not list(Path(tmp).glob("*.pending")) and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(list(Path(tmp).glob("*.pending")))
+            finally:
+                stop.set()
+                engine.close_renderer()
+                task.join(3)
+            self.assertEqual(result, [(None, "muted")])
+            self.assertIsNotNone(proc.poll())
+            self.assertFalse(list(Path(tmp).iterdir()))
+
+    def test_second_segment_is_prepared_during_first_without_early_subtitles(self):
+        from unittest.mock import Mock
+        app = object.__new__(MochiApp)
+        app.events = queue.Queue()
+        release = threading.Event()
+        prepared = threading.Event()
+        started = threading.Event()
+        speech = Mock(provider="sapi", language="en")
+        def prepare(text, *_):
+            if text == "two":
+                prepared.set()
+            return None, "muted"
+        def wait(text, _stop):
+            if text == "one":
+                started.set()
+                release.wait(3)
+        speech.prepare_segment.side_effect = prepare
+        speech.wait_timed.side_effect = wait
+        items = queue.Queue()
+        for item in ((0, {"en": "one"}), (1, {"en": "two"}), None):
+            items.put(item)
+        thread = threading.Thread(target=app._speech_worker, args=(items, 1, 1, threading.Event(), speech))
+        thread.start()
+        try:
+            self.assertTrue(started.wait(2))
+            self.assertTrue(prepared.wait(2))
+            self.assertEqual(app.events.get_nowait()[:4], ("segment", 1, 1, 0))
+            self.assertTrue(app.events.empty())
+        finally:
+            release.set()
+            thread.join(3)
+        self.assertEqual(app.events.get_nowait()[:4], ("segment", 1, 1, 1))
+        self.assertEqual(app.events.get_nowait(), ("speech_done", 1, 1))
+
     def test_hands_free_gate_uses_level_preroll_and_silence(self):
         from array import array
         from pet.voice_input import SpeechGate, RATE
@@ -171,6 +266,8 @@ class DesktopTest(unittest.TestCase):
     """Real Tk selection and ImageGrab over a local solid-colour fixture."""
 
     def setUp(self):
+        # Tcl interpreters from previous test windows must be collected on the Tk thread.
+        gc.collect()
         set_dpi_awareness()
         cfg = copy.deepcopy(DEFAULTS)
         cfg.update(_api_key="test", muted=True, save_history=False)
@@ -408,6 +505,22 @@ class DesktopTest(unittest.TestCase):
             self.assertEqual(spoken, [answer["segments"][0]["it"]])
             self.assertEqual(self.app.canvas.itemcget(self.app.zh_id, "text"), answer["segments"][0]["zh"])
             self.assertIn(spoken[0], self.app.transcript[-1])
+
+    def test_gpu_renderer_is_reused_for_input_and_released_on_hide(self):
+        app = self.app
+        app.speech.provider, app.speech.device, app.speech.muted = "vits", "cuda", False
+        with patch.object(app.speech, "warmup") as warmup, patch.object(app.speech, "close_renderer") as close:
+            app.show_input()
+            warmup.assert_called_once()
+            timer = app.renderer_timer
+            self.assertIsNotNone(timer)
+            close.reset_mock()
+            app.stop_speech(keep_idle=True)
+            self.assertEqual(timer, app.renderer_timer)
+            close.assert_not_called()
+            app._hide_window()
+            close.assert_called_once()
+            self.assertIsNone(app.renderer_timer)
 
     def test_lapland_poses_follow_a_request(self):
         entered = threading.Event()

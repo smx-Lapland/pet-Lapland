@@ -11,6 +11,7 @@ import time
 import tkinter as tk
 from tkinter import font as tkfont
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +126,7 @@ class MochiApp:
         self.dialog: tk.Toplevel | None = None
         self.speech_token = 0
         self.speech_stop: threading.Event | None = None
+        self.renderer_timer = None
         self.capturing = False
         self.closing = False
         self.hidden = start_hidden
@@ -817,7 +819,7 @@ class MochiApp:
             return
         self._cancel_voice_input()
         self.hide_input()
-        self.stop_speech()
+        self.stop_speech(keep_idle=True)
         self.request_seq += 1
         self.awaiting_answer = self.stream_started = False
         level = MIC_THRESHOLDS.get(self.cfg.get("mic_threshold"), MIC_THRESHOLDS["较高"])
@@ -832,6 +834,7 @@ class MochiApp:
             self._show_error("Microphone unavailable", str(exc))
             return
         self.conversation = gate
+        self._warm_gpu_for_input()
         self.conversation_button.configure(text="结束对话", bg=CORAL)
         self.state = "idle"
         self._set_status("LISTENING", TEAL)
@@ -853,7 +856,7 @@ class MochiApp:
             self._show_missing_key()
             return "break"
         self._cancel_voice_input()
-        self.stop_speech()
+        self.stop_speech(keep_idle=True)
         self.request_seq += 1  # Ignore any outstanding streamed answer after an interruption.
         self.awaiting_answer = False
         self.stream_started = False
@@ -864,6 +867,7 @@ class MochiApp:
             return "break"
         self.voice_turn = threading.Event()
         self.talk_button.focus_set()
+        self._warm_gpu_for_input()
         self.talk_button.grab_set()
         self.talk_button.configure(text="松开发送", bg=CORAL)
         self.state = "listening"
@@ -1016,8 +1020,9 @@ class MochiApp:
             return
         self._cancel_voice_input()
         log.info("show input")
-        self.stop_speech()
+        self.stop_speech(keep_idle=True)
         self._set_input_visible(True)
+        self._warm_gpu_for_input()
         if self.state != "thinking":
             self._set_pose("curious")
             self._set_status("ASK", TEAL)
@@ -1057,7 +1062,7 @@ class MochiApp:
             return
         self.input_var.set("")
         self.hide_input()
-        self.stop_speech()
+        self.stop_speech(keep_idle=True)
         if self.last_image is not None:
             self._start_ask(self.last_image, text, follow_up=True)
         else:
@@ -1193,6 +1198,9 @@ class MochiApp:
             log.warning("Could not load conversation memory")
         self.hide_input()
         self._show_thinking(follow_up, image is not None)
+        if self.panel_open and not self.hidden:
+            self._cancel_renderer_timer()
+            self.request_speech.warmup()
         threading.Thread(
             target=self._ask_worker,
             args=(self.client, image, question, history, seq, follow_up, context),
@@ -1217,6 +1225,7 @@ class MochiApp:
         self.last_answer = answer
         if self.hidden or not self.panel_open:
             return
+        self._cancel_renderer_timer()
         self.state = "speaking"
         self._set_pose("smile")
         self._set_status("PREPARING VOICE", GOLD)
@@ -1307,38 +1316,53 @@ class MochiApp:
 
     def _speech_worker(self, items, seq, token, stop_event, speech) -> None:
         provider = speech.provider
-        while not stop_event.is_set():
-            try:
-                item = items.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            if item is None:
-                break
-            index, segment = item
-            path = None
-            try:
-                direction = {"emotion": segment["emotion"]} if segment.get("emotion") else {}
-                path, used = speech.prepare_segment(segment[speech.language], stop_event, provider, **direction)
+        playing = None
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="pet-playback") as player:
+            while not stop_event.is_set():
+                try:
+                    item = items.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    break
+                index, segment = item
+                text = segment[speech.language]
+                try:
+                    direction = {"emotion": segment["emotion"]} if segment.get("emotion") else {}
+                    path, used = speech.prepare_segment(text, stop_event, provider, **direction)
+                except Exception as exc:
+                    log.warning("voice unavailable (%s)", type(exc).__name__)
+                    path, used = None, "unavailable"
                 if used == "sapi":
                     provider = "sapi"
-                duration = wav_duration(path) if path else subtitle_duration(segment[speech.language])
+                # Prepare one segment during playback; the subtitle changes only at its turn.
+                if playing is not None:
+                    playing.result()
+                playing = player.submit(self._play_segment, seq, token, index, text, path, used, stop_event, speech)
+        if not stop_event.is_set():
+            self.events.put(("speech_done", seq, token))
+
+    def _play_segment(self, seq, token, index, text, path, used, stop_event, speech):
+        try:
+            if stop_event.is_set():
+                return
+            try:
+                duration = wav_duration(path) if path else subtitle_duration(text)
                 self.events.put(("segment", seq, token, index, used, duration))
                 if path and speech.play_file(path, stop_event):
-                    continue
+                    return
                 if path:
                     self.events.put(("segment", seq, token, index, "unavailable"))
             except Exception as exc:
                 log.warning("voice unavailable (%s)", type(exc).__name__)
                 self.events.put(("segment", seq, token, index, "unavailable"))
-            finally:
-                if path:
-                    try:
-                        path.unlink(missing_ok=True)
-                    except OSError:
-                        log.warning("could not remove temporary audio")
-            speech.wait_timed(segment[speech.language], stop_event)
-        if not stop_event.is_set():
-            self.events.put(("speech_done", seq, token))
+            speech.wait_timed(text, stop_event)
+        finally:
+            if path:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    log.warning("could not remove temporary audio")
 
     def _on_segment(self, seq: int, token: int, index: int, used: str, duration=None) -> None:
         if seq != self.request_seq or token != self.speech_token or not self.last_answer:
@@ -1361,6 +1385,8 @@ class MochiApp:
     def _on_speech_done(self, seq: int, token: int) -> None:
         if seq != self.request_seq or token != self.speech_token:
             return
+        if not self._warm_gpu_for_input():
+            self.request_speech.close_renderer()
         self.speech_stop = None
         self.segment_queue = None
         self._set_pose("victory")
@@ -1370,12 +1396,31 @@ class MochiApp:
         self._set_counter("")
         self._resume_conversation()
 
-    def stop_speech(self) -> None:
+    def _warm_gpu_for_input(self):
+        if self.speech.device != "cuda" or self.speech.muted or self.speech.provider not in ("lapland", "vits"):
+            return False
+        self._cancel_renderer_timer()
+        self.speech.warmup()
+        self.renderer_timer = self.root.after(30000, self._release_idle_renderer)
+        return True
+
+    def _cancel_renderer_timer(self):
+        if self.renderer_timer is not None:
+            self.root.after_cancel(self.renderer_timer)
+            self.renderer_timer = None
+
+    def _release_idle_renderer(self):
+        self.renderer_timer = None
+        self.speech.close_renderer()
+
+    def stop_speech(self, *, keep_idle=False) -> None:
         self._cancel_page_timer()
         self.segment_queue = None
         if self.speech_stop is not None:
             self.speech_stop.set()
-        self.speech.stop()
+        if not (keep_idle and self.renderer_timer is not None):
+            self._cancel_renderer_timer()
+            self.speech.stop()
         self.speech_token += 1
         self.speech_stop = None
         if self.state == "speaking":

@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 from .hotkeys import parse_hotkey
 from .voice_input import MIC_THRESHOLDS
+from .voice_device import DEVICE_LABELS
 
 
 class MemoryDialog(tk.Toplevel):
@@ -168,6 +169,7 @@ class SettingsDialog(tk.Toplevel):
             ("speech_language", "回答和朗读语言", "意大利语" if cfg.get("speech_language") == "it" else "英语"),
             ("mic_threshold", "连续对话收音门槛", cfg.get("mic_threshold", "较高")),
             ("speech_provider", "语音服务", cfg["speech_provider"]),
+            ("voice_device", "本地神经语音运算", DEVICE_LABELS.get(cfg.get("voice_device"), DEVICE_LABELS["auto"])),
             ("voice", "系统声音（SAPI）", cfg["voice"]),
             ("neural_voice", "云端英语音色", cfg["neural_voice"]),
             ("neural_voice_it", "云端意大利语音色", cfg.get("neural_voice_it", "it-IT-ElsaNeural")),
@@ -187,6 +189,8 @@ class SettingsDialog(tk.Toplevel):
                 widget = ttk.Combobox(body, textvariable=var, values=providers, state="readonly")
             elif key == "speech_language":
                 widget = ttk.Combobox(body, textvariable=var, values=("英语", "意大利语"), state="readonly")
+            elif key == "voice_device":
+                widget = ttk.Combobox(body, textvariable=var, values=tuple(DEVICE_LABELS.values()), state="readonly")
             elif key == "mic_threshold":
                 widget = ttk.Combobox(body, textvariable=var, values=tuple(MIC_THRESHOLDS), state="readonly")
             else:
@@ -213,6 +217,7 @@ class SettingsDialog(tk.Toplevel):
     def apply(self):
         values = {key: var.get() for key, var in self.fields.items()}
         values["speech_language"] = "it" if values["speech_language"] == "意大利语" else "en"
+        values["voice_device"] = "cpu" if values["voice_device"] == DEVICE_LABELS["cpu"] else "auto"
         try:
             values["model"] = values["model"].strip()
             if not values["model"]:

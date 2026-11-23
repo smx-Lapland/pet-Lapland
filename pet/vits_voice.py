@@ -6,18 +6,19 @@ import wave
 from pathlib import Path
 
 import numpy as np
-import onnxruntime as ort
 import parselmouth
 import miniaudio
 from parselmouth.praat import call
-from piper import PiperVoice
-from piper.config import PiperConfig, SynthesisConfig
 from .voice_input import FILES, MODEL_DIR, load_recognizer, recognize_audio
+from .voice_device import execution_providers
 
 ROOT = Path(__file__).resolve().parents[1]
 RATE = 22050
 MODELS = ROOT / "models" / "piper-vits-reference"
 REFERENCES = ROOT / "assets" / "lapland" / "voice" / "emotions"
+# Piper duration multiplier and maximum syllable emphasis in dB.
+DELIVERY = {"NEUTRAL": (1.0, 0.0), "MOCKING": (1.02, 2.3), "MANIC": (.94, 2.6),
+            "LAZY": (1.07, .8), "WHISPER": (1.04, .5)}
 
 
 def pitch_track(samples):
@@ -45,7 +46,12 @@ def follow_contour(audio, reference):
     phase = np.linspace(0, 1, len(notes))
     ref_curve = np.array([np.median(v) for v in np.array_split(reference, 7)])
     own_curve = np.array([np.median(v) for v in np.array_split(notes, 7)])
-    shift = np.clip(.34 * (ref_curve - own_curve), -2.3, 2.3)
+    # When the reference has a higher register, a single absolute correction can
+    # hit its limit at every point and lose the rise and fall of the performance.
+    ref_center, own_center = np.median(reference), np.median(notes)
+    register = np.clip(.30 * (ref_center - own_center), -1.1, 1.1)
+    phrasing = (ref_curve - ref_center) - (own_curve - own_center)
+    shift = np.clip(register + .50 * phrasing, -2.3, 2.3)
     target = 2 ** ((notes + np.interp(phase, knots, shift)) / 12)
     sound = parselmouth.Sound(audio, RATE)
     manip = call(sound, "To Manipulation", .0125, 80, 620)
@@ -86,6 +92,11 @@ def resample(audio, source_rate, target_rate):
 
 class ReferenceVoice:
     def __init__(self, language):
+        providers = execution_providers()
+        import onnxruntime as ort
+        from piper import PiperVoice
+        from piper.config import PiperConfig
+
         self.language = language
         self.recognizer = None
         model = MODELS / f"lapland-{language}.onnx"
@@ -93,7 +104,7 @@ class ReferenceVoice:
         opts.intra_op_num_threads = 2
         opts.inter_op_num_threads = 1
         def session(path):
-            return ort.InferenceSession(str(path), sess_options=opts, providers=["CPUExecutionProvider"])
+            return ort.InferenceSession(str(path), sess_options=opts, providers=providers)
         config = PiperConfig.from_dict(json.loads(Path(str(model) + ".json").read_text("utf-8")))
         self.piper = PiperVoice(session(model), config)
         self.converter = session(MODELS / "tone.onnx")
@@ -109,20 +120,38 @@ class ReferenceVoice:
         return self.converter.run(None, {"source": spectrum(audio), "target": self.targets[emotion]})[0][0, 0]
 
     def generate(self, text, emotion="NEUTRAL", rate=0, *, contour=True):
+        from piper.config import SynthesisConfig
+        from .neural_worker import emphasize_syllables, trim_phrase_join
+
         if emotion not in self.targets:
             emotion = "NEUTRAL"
         reference_pitch, pause = self.reference(emotion)
-        gap = np.zeros(round(RATE * pause), np.float32)
-        cfg = SynthesisConfig(length_scale=2 ** (-max(-10, min(10, rate)) / 10))
+        duration, stress_db = DELIVERY.get(emotion, DELIVERY["NEUTRAL"])
+        cfg = SynthesisConfig(length_scale=duration * 2 ** (-max(-10, min(10, rate)) / 10))
         parts = []
+        next_pause = pause
         for chunk in self.piper.synthesize(text, cfg):
             audio = chunk.audio_float_array
             if len(audio) < 512:
                 continue
             converted = self.convert(audio, emotion)
+            phrase = follow_contour(converted, reference_pitch) if contour else converted
+            if stress_db:
+                phrase = emphasize_syllables(phrase, RATE, stress_db)
             if parts:
-                parts.append(gap)
-            parts.append(follow_contour(converted, reference_pitch) if contour else converted)
+                # Remove decoder padding before inserting the actor's measured pause.
+                parts[-1] = trim_phrase_join(parts[-1], RATE, False, True)
+                parts.append(np.zeros(round(RATE * next_pause), np.float32))
+                phrase = trim_phrase_join(phrase, RATE, True, False)
+            parts.append(phrase)
+            ending = "".join(chunk.phonemes).rstrip()
+            if emotion == "MOCKING":
+                # Give the question a beat to land, then bring the comeback in close.
+                next_pause = min(.48, pause + .10) if ending.endswith("?") else max(.10, pause * .72)
+            elif emotion == "MANIC" and ending.endswith("!"):
+                next_pause = max(.12, pause * .65)
+            else:
+                next_pause = pause
         if not parts:
             raise ValueError("No speech generated")
         output = np.concatenate(parts)

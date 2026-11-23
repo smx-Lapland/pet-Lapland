@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import CACHE_DIR
+from .voice_device import cuda_installed
 
 log = logging.getLogger("mochi.speech")
 
@@ -29,6 +30,8 @@ class SpeechEngine:
     def __init__(self, cfg: dict[str, Any], script_path: Path):
         self.voice = str(cfg.get("voice", "Zira"))
         self.provider = cfg.get("speech_provider", "lapland")
+        self.device = ("cuda" if cfg.get("voice_device", "auto") == "auto"
+                       and self.provider in ("lapland", "vits", "piper") and cuda_installed() else "cpu")
         self.language = "it" if cfg.get("speech_language") == "it" else "en"
         self.neural_voice = (cfg.get("neural_voice_it", "it-IT-ElsaNeural") if self.language == "it"
                              else cfg.get("neural_voice", "en-US-JennyNeural"))
@@ -39,6 +42,76 @@ class SpeechEngine:
         self.script_path = script_path
         self._powershell = self._find_powershell()
         self._play_lock = threading.Lock()
+        self._renderer_lock = threading.Lock()
+        self._renderer = None
+
+    def _neural_command(self):
+        # Launch the interpreter directly so cancellation also stops native inference.
+        return [getattr(sys, "_base_executable", None) or sys.executable,
+                str(Path(__file__).with_name("neural_worker.py"))]
+
+    def _sapi_command(self):
+        return [self._powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                "Bypass", "-File", str(self.script_path)]
+
+    def _neural_env(self):
+        return {**os.environ, "__PYVENV_LAUNCHER__": sys.executable, "PET_TTS_DEVICE": self.device}
+
+    def warmup(self):
+        if self.muted or self.provider not in ("sapi", "vits", "lapland"):
+            return
+        with self._renderer_lock:
+            if self._renderer is not None:
+                return
+            cmd, env = self._sapi_command() + ["-Session"], None
+            if self.provider != "sapi":
+                cmd = self._neural_command() + ["--session", self.provider, self.language]
+                env = self._neural_env()
+            try:
+                self._renderer = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                                  stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW, env=env)
+            except OSError:
+                log.warning("Could not prestart local voice worker")
+
+    def close_renderer(self, expected=None):
+        with self._renderer_lock:
+            proc = self._renderer
+            if proc is None or (expected is not None and expected is not proc):
+                return
+            self._renderer = None
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass  # A write in flight may have lost its reader during cancellation.
+
+    def _render_prepared(self, proc, job, path, stop_event, timeout):
+        complete = False
+        try:
+            if not stop_event.is_set():
+                proc.stdin.write(json.dumps(job, ensure_ascii=True).encode("ascii") + b"\n")
+                proc.stdin.flush()
+            deadline = time.monotonic() + timeout
+            while not stop_event.is_set() and time.monotonic() < deadline:
+                if path.is_file():
+                    complete = wav_duration(path) > 0
+                    return complete
+                if proc.poll() is not None:
+                    return None  # A failed warm worker can retry the ordinary one-shot path.
+                stop_event.wait(.02)
+        except BrokenPipeError:
+            return None
+        except (OSError, ValueError, EOFError, wave.Error):
+            pass
+        finally:
+            if not complete:
+                self.close_renderer(proc)
+                proc.wait()
+                Path(str(path) + ".pending").unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
+        return False
 
     @staticmethod
     def _find_powershell() -> str:
@@ -58,37 +131,53 @@ class SpeechEngine:
                     winsound.PlaySound(None, 0)
             except Exception:
                 pass
+        self.close_renderer()
 
     def prepare_segment(self, text, stop_event, provider, emotion=None):
         if self.muted or stop_event.is_set():
             return None, "muted"
-        if provider in ("api", "piper", "azure", "edge", "lapland", "vits"):
-            path = CACHE_DIR / f"tts_{uuid.uuid4().hex}.wav"
-            job = {"path": str(path), "text": sanitize_for_tts(text, self.language), "rate": self.rate,
-                   "voice": self.neural_voice, "provider": provider, "language": self.language, "emotion": emotion}
+        path = CACHE_DIR / f"tts_{uuid.uuid4().hex}.wav"
+        job = {"path": str(path), "text": sanitize_for_tts(text, self.language), "rate": self.rate,
+               "voice": self.voice if provider == "sapi" else self.neural_voice,
+               "provider": provider, "language": self.language, "emotion": emotion}
+        timeout = {"sapi": 30, "lapland": 90, "vits": 90, "api": 90, "piper": 90}.get(provider, 18)
+        if provider == "vits" and self.language == "it":
+            timeout = 150
+        with self._renderer_lock:
+            proc = self._renderer if provider == self.provider and not stop_event.is_set() else None
+        if proc is not None:
+            rendered = self._render_prepared(proc, job, path, stop_event, timeout)
+            if rendered:
+                return path, provider
+            if stop_event.is_set():
+                return None, "muted"
+            if self.device == "cuda":
+                log.warning("Local GPU worker failed; retrying the same voice on CPU")
+                self.device = "cpu"
+                proc = None
+            elif rendered is None:
+                proc = None
+        if provider in ("api", "piper", "azure", "edge", "lapland", "vits") and proc is None:
             if provider == "api":
                 job.update(self.api)
             if provider == "piper":
                 from .characters import character
                 job["model_path"] = str(character(self.character_id).folder / "voice.onnx")
-            try:
-                # Spawn the interpreter directly so cancellation also terminates
-                # native inference on Windows, where a venv launcher is a parent process.
-                python = getattr(sys, "_base_executable", None) or sys.executable
-                env = {**os.environ, "__PYVENV_LAUNCHER__": sys.executable}
-                timeout = 90 if provider in ("lapland", "vits", "api", "piper") else 18
-                if provider == "vits" and self.language == "it":
-                    timeout = 150  # A long reply may need an additional local synthesis and transcription.
-                ok = run_worker([python, str(Path(__file__).with_name("neural_worker.py"))],
-                                stop_event, timeout,
-                                json.dumps(job).encode("utf-8"), env=env)
-                if ok and wav_duration(path) > 0:
-                    return path, provider
-            except (OSError, ValueError, EOFError, wave.Error):
-                pass
-            path.unlink(missing_ok=True)
-            if stop_event.is_set():
-                return None, "muted"
+            while not stop_event.is_set():
+                try:
+                    ok = run_worker(self._neural_command(), stop_event, timeout,
+                                    json.dumps(job).encode("utf-8"), env=self._neural_env())
+                    if ok and wav_duration(path) > 0:
+                        return path, provider
+                except (OSError, ValueError, EOFError, wave.Error):
+                    pass
+                path.unlink(missing_ok=True)
+                if stop_event.is_set():
+                    return None, "muted"
+                if self.device != "cuda":
+                    break
+                log.warning("Local GPU worker failed; retrying the same voice on CPU")
+                self.device = "cpu"
             log.warning("%s voice unavailable, using SAPI", provider)
         paths = self.synthesize([text], stop_event)
         return (paths[0], "sapi") if paths else (None, "unavailable")
@@ -115,19 +204,7 @@ class SpeechEngine:
         try:
             job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
             ok = run_worker(
-                [
-                    self._powershell,
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(self.script_path),
-                    "-JobFile",
-                    str(job_path),
-                    "-ResultFile",
-                    str(result_path),
-                ],
+                self._sapi_command() + ["-JobFile", str(job_path), "-ResultFile", str(result_path)],
                 stop_event, 30,
             )
             if result_path.exists():

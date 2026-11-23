@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import lru_cache
 import json
 import os
 import re
@@ -13,10 +14,10 @@ import wave
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-if __package__:
-    from .network import AUDIO_LIMIT, open_api, read_body
-else:  # The speech engine runs this file as a standalone child process.
-    from network import AUDIO_LIMIT, open_api, read_body
+if not __package__:  # The speech engine runs this file as a standalone child process.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pet.network import AUDIO_LIMIT, open_api, read_body
+from pet.voice_device import execution_providers
 
 
 def azure_audio(text: str, voice: str, rate: str) -> bytes:
@@ -50,10 +51,19 @@ async def edge_audio(text: str, voice: str, rate: str) -> bytes:
     return bytes(audio)
 
 
-def main() -> None:
-    job = json.loads(sys.stdin.buffer.read())
+@lru_cache(maxsize=1)
+def reference_voice(language):
+    execution_providers()
+    from pet.vits_voice import ReferenceVoice
+    import onnxruntime as ort
+    ort.set_seed(189)
+    return ReferenceVoice(language)
+
+
+def render_job(job):
     path = Path(job["path"])
     if job["provider"] == "piper":
+        providers = execution_providers()
         import onnxruntime as ort
         from piper import PiperVoice
         from piper.config import PiperConfig, SynthesisConfig
@@ -61,7 +71,7 @@ def main() -> None:
         model = Path(job["model_path"])
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 2
-        session = ort.InferenceSession(model.read_bytes(), sess_options=opts, providers=["CPUExecutionProvider"])
+        session = ort.InferenceSession(model.read_bytes(), sess_options=opts, providers=providers)
         config = PiperConfig.from_dict(json.loads(Path(str(model) + ".json").read_text("utf-8")))
         voice = PiperVoice(session, config)
         with wave.open(str(path), "wb") as out:
@@ -90,15 +100,14 @@ def main() -> None:
     if job["provider"] == "vits":
         if play_original_line(path, job["text"], job["language"], job["rate"]):
             return
-        if not __package__:
-            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from pet.vits_voice import RATE, ReferenceVoice
+        execution_providers()
         import numpy as np
         import onnxruntime as ort
 
         ort.set_seed(189)
         np.random.seed(72)
-        voice = ReferenceVoice(job["language"])
+        voice = reference_voice(job["language"])
+        from pet.vits_voice import RATE
         audio = voice.render(job["text"], job.get("emotion"))
         write_voice_wav(path, audio, RATE, job["rate"])
         return
@@ -446,17 +455,23 @@ def lapland_audio(path: Path, text: str, language: str, rate: int, emotion=None)
     write_voice_wav(path, audio, sample_rate, rate)
 
 
-def synthesize_pocket(text, language, emotion, pause_seconds=None):
-    import numpy as np
-
+@lru_cache(maxsize=1)
+def pocket_model(language):
+    providers = execution_providers()
     root = Path(__file__).resolve().parents[1]
     runtime = root / "models" / "pocket-tts"
-    voices = root / "assets" / "lapland" / "voice"
     bundle = {"en": "english_2026-04", "it": "italian"}[language]
     sys.path.insert(0, str(runtime))
     from pocket_tts_onnx import PocketTTSOnnx
 
     class VoiceModel(PocketTTSOnnx):
+        def _get_providers(self, device):
+            return providers
+
+        @property
+        def device(self):
+            return "cuda" if "CUDAExecutionProvider" in self.flow_lm_main.get_providers() else "cpu"
+
         def _model_file(self, stem):
             if stem == "mimi_decoder" and (self.bundle_dir / "mimi_decoder.onnx").is_file():
                 return "mimi_decoder.onnx"
@@ -466,8 +481,17 @@ def synthesize_pocket(text, language, emotion, pause_seconds=None):
     full_models = ("flow_lm_main.onnx", "flow_lm_flow.onnx", "mimi_decoder.onnx")
     precision = "fp32" if all((bundle_dir / name).is_file() for name in full_models) else "int8"
     temperature, steps = (0.65, 8) if language == "en" else (0.7, 4)
-    model = VoiceModel(models_dir=str(runtime / "onnx"), language=bundle, device="cpu",
-                       precision=precision, temperature=temperature, lsd_steps=steps)
+    return VoiceModel(models_dir=str(runtime / "onnx"), language=bundle,
+                      precision=precision, temperature=temperature, lsd_steps=steps)
+
+
+def synthesize_pocket(text, language, emotion, pause_seconds=None):
+    import numpy as np
+
+    root = Path(__file__).resolve().parents[1]
+    runtime = root / "models" / "pocket-tts"
+    voices = root / "assets" / "lapland" / "voice"
+    model = pocket_model(language)
     expressive = voices / f"expressive-{language}.npz"
     if expressive.is_file():
         with np.load(expressive, allow_pickle=False) as profile:
@@ -510,6 +534,31 @@ def write_voice_wav(path, audio, sample_rate, rate):
     with wave.open(str(path), "wb") as out:
         out.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
         out.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+
+
+def main():
+    if sys.argv[1:2] != ["--session"]:
+        render_job(json.loads(sys.stdin.buffer.read()))
+        return
+    provider, language = sys.argv[2:]
+    try:
+        if provider == "vits":
+            voice = reference_voice(language)
+            if language == "it":
+                from pet.voice_input import FILES, MODEL_DIR, load_recognizer
+                if all((MODEL_DIR / f).is_file() for f in FILES):
+                    voice.recognizer = load_recognizer("it")
+        elif provider == "lapland":
+            pocket_model(language)
+    except Exception:
+        # Exact recorded lines can still play when optional inference assets are missing.
+        pass
+    for line in sys.stdin.buffer:
+        job = json.loads(line)
+        target = Path(job["path"])
+        pending = Path(str(target) + ".pending")
+        render_job({**job, "path": str(pending)})
+        pending.replace(target)
 
 
 if __name__ == "__main__":

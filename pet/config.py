@@ -31,6 +31,7 @@ DEFAULTS: dict[str, Any] = {
     "tts_key_env": "",
     "voice": "Zira",
     "speech_provider": "lapland",
+    "voice_device": "auto",
     "speech_language": "en",
     "mic_threshold": "较高",
     "neural_voice": "en-US-JennyNeural",

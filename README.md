@@ -100,6 +100,18 @@ Remove-Item Env:PET_MODEL_KEY
 
 拉普兰德的角色提示词控制措辞、断句和语气。回答首段可标注 `LAZY`、`MOCKING`、`MANIC`、`WHISPER` 或 `NEUTRAL`，合成前会移除标签。音色仍取决于对应语言的声学模型和参考录音。缪尔赛思示例使用 ImageGen 生成的同人立绘和 Windows 系统配音。[拉普兰德情绪参考表](assets/lapland/voice/emotions/references.json) · [缪尔赛思立绘说明](assets/characters/muelsyse/artwork.md)
 
+本地 VITS 在本机运行 Piper 和音色转换，再播放聊天模型生成的台词。英语和意大利语各用自己的模型和参考录音。合成调侃台词时，反问之后会留一点时间，接下来的短句收紧停顿。兴奋台词的语速略快，重读音节更突出。完整匹配原作台词时仍直接播放原录音。
+
+在「设置… → 本地神经语音运算」可以选「GPU 优先（自动回退 CPU）」或「仅 CPU」。前者在装有可选 CUDA 运行库时让 NVIDIA GPU 运行支持的 ONNX 算子，保留 CPU 后端。语调处理和意配的 Whisper 发音复核使用 CPU。显卡运行失败时，桌宠通过独立的 CPU 进程重试同一角色音色。Windows 系统朗读和云端语音仍由所选服务处理。
+
+**为 Windows x64 源码版启用 CUDA。** 已验证的组合是 64 位 Python 3.12、可用的 NVIDIA 驱动和 CUDA Toolkit 12.8。在项目根目录运行下列命令，将 GPU 版 ONNX Runtime 和 cuDNN 装进语音专用目录。使用 CPU 的电脑只需第 1 节的普通安装。分享版默认携带 CPU 运行库。
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --only-binary=:all: --no-deps --target models/ort-cuda onnxruntime-gpu==1.23.2 nvidia-cudnn-cu12==9.10.2.21
+```
+
+GPU 模式会在开始输入或收音时预热拉普兰德的语音模型。回答结束后最多保留 30 秒供追问复用，收起面板、切换设置或中断播放会释放引擎。首次使用显卡可能需要更长的初始化时间，连续朗读更容易受益。打游戏时可以随时在设置里选「仅 CPU」。[ONNX Runtime CUDA 后端与依赖说明](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html)
+
 ## 5. 切换、制作和分享角色
 
 1. **只想看缪尔赛思**：右键 **角色与迁移…**，在顶端下拉框选「缪尔赛思」，点 **启用所选角色**。窗口标题变为 `pet-Muelsyse`。切回拉普兰德用相同操作。
