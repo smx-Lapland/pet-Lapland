@@ -20,7 +20,7 @@ py -3.12 -m venv .venv
 
 第三行会打开桌宠。首次运行源码版使用拉普兰德，会在项目目录生成 `config.json`。如提示缺少密钥，按下一节配置。以后直接双击 `run_pet.cmd` 即可。想在桌面启动，可以给这个文件创建 Windows 快捷方式。`py` 无法识别时，先安装带 Python Launcher 和 Tcl/Tk 的 Windows 版 Python 3.12，重新打开 PowerShell。
 
-**已经收到缪尔赛思分享包的同学**，把 `Muelsyse-Windows-x64.zip` 完整解压到可写目录，双击里面的 `Start.cmd`，直接做第 2 节。这个 ZIP 是打包脚本的输出，GitHub 的 **Download ZIP** 下载的是源码。只有 `.petpack` 文件时，先安装桌宠，再按第 5 节导入。[分享版使用说明](docs/portable-start.md)
+**想直接运行缪尔赛思的同学**，登录有仓库访问权限的 GitHub 账号，从发布页的 **Assets** 下载 `Muelsyse-Windows-x64.zip`，完整解压到可写目录，双击 `Start.cmd`，然后做第 2 节。这个分享版内置网络与隐私防护。已安装新版桌宠时，可以只下载 `Muelsyse.petpack`，按第 5 节导入。角色包里的立绘和设定由接收方安装的桌宠加载，旧版程序需要单独更新。[缪尔赛思 v0.2.0 下载](https://github.com/smx-Lapland/pet-Lapland/releases/tag/v0.2.0) · [分享版使用说明](docs/portable-start.md)
 
 ## 2. 接入模型并发出第一条消息
 
