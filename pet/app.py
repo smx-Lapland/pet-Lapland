@@ -91,6 +91,7 @@ class MochiApp:
     PET_WIDTH = 167
     PANEL_IDLE_SECONDS = 30
     CONTENT_X = 198
+    CAPTION_Y = 161
 
     @property
     def subtitle_width(self):
@@ -399,10 +400,10 @@ class MochiApp:
         )
         self.captions = ScrollingCaptions(c, self.subtitle_width, (self.spoken_font, self.translation_font),
                                           (WHITE, CREAM))
-        self.captions.set_backdrop(skin, self.CONTENT_X - 168, 196 - 8)
-        c.create_window(self.CONTENT_X, 196, anchor="nw", window=self.captions)
+        self.captions.set_backdrop(skin, self.CONTENT_X - 168, self.CAPTION_Y - 8)
+        c.create_window(self.CONTENT_X, self.CAPTION_Y, anchor="nw", window=self.captions)
         self.captions.bind("<Button-3>", self._popup_menu)
-        c.create_line(self.CONTENT_X, 178, self.CONTENT_X + self.subtitle_width, 178, fill="#645863")
+        c.create_line(self.CONTENT_X, 153, self.CONTENT_X + self.subtitle_width, 153, fill="#645863")
         self.project_button = tk.Menubutton(c, bg=CONTROL, fg=CREAM, activebackground=TEAL,
                                           relief="flat", indicatoron=True, anchor="w",
                                           font=("Microsoft YaHei UI", -13), cursor="hand2")
@@ -680,7 +681,7 @@ class MochiApp:
             self.canvas.itemconfigure(self.role_label, text=self.role_title)
             self.canvas.itemconfigure(self.input_prompt_id, text=self.input_placeholder)
             skin = self._backdrop()
-            self.captions.set_backdrop(skin, self.CONTENT_X - 168, 196 - 8)
+            self.captions.set_backdrop(skin, self.CONTENT_X - 168, self.CAPTION_Y - 8)
             self.bubble_skin = ImageTk.PhotoImage(skin, master=self.root)
             self.canvas.itemconfigure(self.skin_item, image=self.bubble_skin)
             self._load_poses()

@@ -474,6 +474,21 @@ class DesktopTest(unittest.TestCase):
         self.app._open_panel()
         caps = self.app.captions
         en, zh = caps.rows
+        # Slightly wider than one line in each language, measured at the current DPI.
+        texts = []
+        for phrase, font in (("Your move, Doctor. ", self.app.spoken_font),
+                             ("博士，轮到你了。", self.app.translation_font)):
+            texts.append(phrase * (caps.viewport // font.measure(phrase) + 2))
+        self.app._show_content(*texts, duration=2)
+        self.app.root.update()
+        for track, item, line in zip(caps.tracks, caps.rows, caps.line_heights):
+            box = track.bbox(item)
+            self.assertEqual(box[3] - box[1], 2 * line)
+            self.assertEqual(track.winfo_height(), 2 * line)
+        self.assertEqual(caps.overflow, [0, 0])
+        self.assertIsNone(caps.timer)
+        self.assertLessEqual(caps.winfo_y() + caps.winfo_height(),
+                             self.app.canvas.bbox(self.app.project_window)[1])
         short = "轮到你了，博士。"
         long = "Prima scegli una carta, poi vediamo chi ride. " * 6
         self.app._show_content(long, short, duration=.5)

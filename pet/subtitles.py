@@ -1,4 +1,4 @@
-"""Two clipped caption lines synchronized to one playback timeline."""
+"""Two lines per language, synchronized to one playback timeline."""
 import time
 import tkinter as tk
 
@@ -6,21 +6,22 @@ from PIL import ImageTk
 
 
 class ScrollingCaptions(tk.Canvas):
-    HEIGHT = 82
+    VISIBLE_LINES = 2
 
     def __init__(self, parent, width, fonts, colors):
-        super().__init__(parent, width=width, height=self.HEIGHT, highlightthickness=0, bd=0)
+        self.line_heights = [font.metrics("linespace") for font in fonts]
+        self.track_heights = [self.VISIBLE_LINES * line for line in self.line_heights]
+        self.offsets = (0, self.track_heights[0] + 6)
+        self.height = self.offsets[1] + self.track_heights[1]
+        super().__init__(parent, width=width, height=self.height, highlightthickness=0, bd=0)
         self.viewport = width
         self.backdrop = self.create_image(0, 0, anchor="nw")
         self.tracks = []
         self.rows = []
-        self.line_heights = []
-        for offset, font, color in zip((3, 45), fonts, colors):
-            height = font.metrics("linespace")
+        for offset, height, font, color in zip(self.offsets, self.track_heights, fonts, colors):
             track = tk.Canvas(self, width=width, height=height, bd=0, highlightthickness=0)
             track.create_image(0, 0, anchor="nw", tags="background")
             self.rows.append(track.create_text(2, 0, anchor="nw", font=font, fill=color, width=width - 4))
-            self.line_heights.append(height)
             self.create_window(0, offset, anchor="nw", window=track)
             self.tracks.append(track)
             track.bind("<MouseWheel>", self._wheel)
@@ -33,11 +34,11 @@ class ScrollingCaptions(tk.Canvas):
         self.bind("<MouseWheel>", self._wheel)
 
     def set_backdrop(self, skin, x, y):
-        region = skin.crop((x, y, x + self.viewport, y + self.HEIGHT))
+        region = skin.crop((x, y, x + self.viewport, y + self.height))
         self.skin = ImageTk.PhotoImage(region, master=self)
         self.itemconfigure(self.backdrop, image=self.skin)
         self.backgrounds = []
-        for track, offset, height in zip(self.tracks, (3, 45), self.line_heights):
+        for track, offset, height in zip(self.tracks, self.offsets, self.track_heights):
             image = ImageTk.PhotoImage(region.crop((0, offset, self.viewport, offset + height)), master=track)
             self.backgrounds.append(image)
             track.itemconfigure("background", image=image)
@@ -46,7 +47,7 @@ class ScrollingCaptions(tk.Canvas):
         track, item = self.tracks[i], self.rows[i]
         track.itemconfigure(item, text=" ".join(text.split()))
         box = track.bbox(item)
-        self.overflow[i] = max(0, box[3] - box[1] - self.line_heights[i]) if box else 0
+        self.overflow[i] = max(0, box[3] - box[1] - self.track_heights[i]) if box else 0
 
     def show(self, spoken, translated, duration=None):
         self.stop()

@@ -1,15 +1,39 @@
 from __future__ import annotations
 
+import atexit
+import ctypes
 import logging
 import sys
-from pathlib import Path
+from ctypes import wintypes
 
-from .app import MochiApp
-from .config import LOG_PATH, clean_old_cache, ensure_dirs, load_config
-from .screen import set_dpi_awareness
+INSTANCE_MUTEX = r"Local\pet-Lapland.DesktopInstance"
+
+
+def claim_instance() -> bool:
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateMutexExW
+    create.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD)
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+
+    ctypes.set_last_error(0)
+    handle = create(None, INSTANCE_MUTEX, 0, 0x00100000)  # SYNCHRONIZE
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    if error == 183:  # ERROR_ALREADY_EXISTS
+        close(handle)
+        return False
+    # Hold the name through shutdown, including any speech worker cleanup.
+    atexit.register(close, handle)
+    return True
 
 
 def setup_logging() -> None:
+    from .config import LOG_PATH, ensure_dirs
+
     ensure_dirs()
     handlers: list[logging.Handler] = [logging.FileHandler(LOG_PATH, encoding="utf-8")]
     if sys.stderr is not None:
@@ -23,10 +47,22 @@ def setup_logging() -> None:
 
 
 def main() -> int:
-    set_dpi_awareness()
+    try:
+        if not claim_instance():
+            return 0
+    except OSError:
+        setup_logging()
+        logging.getLogger("mochi.main").exception("Could not acquire the desktop instance mutex")
+        return 1
+
     setup_logging()
     log = logging.getLogger("mochi.main")
     try:
+        from .app import MochiApp
+        from .config import clean_old_cache, load_config
+        from .screen import set_dpi_awareness
+
+        set_dpi_awareness()
         cfg = load_config()
         clean_old_cache()
         app = MochiApp(cfg, start_hidden="--start-hidden" in sys.argv[1:])
