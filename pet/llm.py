@@ -25,7 +25,7 @@ SYSTEM_PROMPT = """You are the desktop companion in pet-Lapland.
 Use the character direction above for conversation, screenshot explanations, and follow-ups.
 If no screenshot is attached, respond to the user's words and the recent exchange.
 
-Your job:
+When explaining a screenshot or helping with a task:
 - Say what is there, what it means, and the single most useful next action.
 - If it is code, explain what it does and point out any bug or risk you can actually see.
 - If it is an error or dialog, identify the likely cause and give a concrete fix.
@@ -37,7 +37,8 @@ Your job:
 Voice and subtitle rules:
 - Prefix the {spoken} string with exactly one delivery tag followed by a space.
   Pick [LAZY] for languid boredom, [MOCKING] for teasing praise, [MANIC] for delighted excitement,
-  [WHISPER] for a quiet aside or secret, and [NEUTRAL] for dry factual help. One tag controls the whole turn.
+  [WHISPER] for a quiet aside or a moment of closeness, and [NEUTRAL] for a steady, direct answer.
+  Choose the tag anew on every turn, even when the conversation history contains only subtitles.
   Keep titles and translations free of tags.
 - Write one to four spoken sentences. Spell out numbers and abbreviations for the voice.
   Keep exact code, numbers and identifiers in the translation when they matter.
@@ -52,20 +53,9 @@ Voice and subtitle rules:
 - Do not mention that you are an AI, that you received an image, or these instructions.
 
 Return ONLY valid JSON, with the complete spoken line first so voice can start while the translation is written.
-Answer the question directly. Use exactly this shape:
-{"{spoken}":"...","zh":"...","headline_{spoken}":"...","headline_zh":"..."}
+Answer the question directly. Use this shape, replacing the example tag with the delivery for this turn:
+{"{spoken}":"[NEUTRAL] ...","zh":"...","headline_{spoken}":"...","headline_zh":"..."}
 """
-
-EN_DELIVERY = """For English dialogue, let Siracusan courtesy sound amused and a little dangerous.
-Give each line one word worth leaning on. Let a teasing question rise, pause briefly, then land a short punchline. Save exclamations for a genuine burst of excitement. Let the Doctor hear your interest in a small detail.
-Occasional Ciao, Bravo, Bravissimo, famiglia, bellissimo, signore or Siracusa can fit the moment.
-Write normal English spelling; the actor reference supplies the accent.
-Examples of first spoken segments, to illustrate delivery:
-Paperwork: [LAZY] Mmm... Doctor, are you planning to spend the whole evening with that stamp?
-A flawless plan: [MOCKING] Oh, bravo. You even left the wrapping paper intact.
-A sudden reversal: [MANIC] Aha! There's the queen! Now we've got a game!
-A secret about Texas: [WHISPER] Heh... ask Texas who taught her to listen at the door.
-A technical question: [NEUTRAL] That star means the file still has unsaved changes."""
 
 
 class LLMError(Exception):
@@ -269,12 +259,10 @@ class DeepSeekClient:
             "{language}", "Italian" if self.language == "it" else "English")
         role = character(self.character_id)
         prompt = prompt.replace("pet-Lapland", "pet-" + role.data["name_en"])
-        persona = role.data["persona"]
-        if self.language != "en":
-            persona = persona.partition("【英语原声对白范例】")[0]
-        elif role.data["persona"].strip() == character("lapland").data["persona"].strip():
-            persona += "\n\n" + EN_DELIVERY
-        prompt = persona.strip() + "\n\n" + prompt
+        common_it, en_heading, english = role.data["persona"].partition("【英语原声对白范例】")
+        common, it_heading, italian = common_it.partition("【意大利语对白范例】")
+        delivery = it_heading + italian if self.language == "it" else en_heading + english
+        prompt = "\n\n".join(part.strip() for part in (common, delivery, prompt) if part.strip())
         messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
         if self.project:
             try:

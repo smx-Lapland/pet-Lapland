@@ -13,6 +13,28 @@ from pet.llm import DeepSeekClient
 
 
 class CharacterTest(unittest.TestCase):
+    def test_lapland_chat_uses_examples_for_the_selected_language(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp):
+            builtin = character("lapland")
+            pack = Path(tmp) / "lapland.petpack"
+            write_pack(pack, builtin.data, {"portrait.png": builtin.sprite("wait")})
+            installed = import_pack(pack)
+            for role in (builtin, installed):
+                for lang in ("en", "it"):
+                    with self.subTest(role=role.id, language=lang):
+                        client = DeepSeekClient({"character_id": role.id, "_api_key": "test", "speech_language": lang})
+                        line = {"en": "Your move.", "it": "Tocca a te."}[lang]
+                        content = json.dumps({lang: "[MOCKING] " + line, "zh": "轮到你了。"})
+                        with patch.object(client, "_post", return_value={"choices": [{"message": {"content": content}}]}) as post:
+                            answer = client.ask(None, "换你啦")
+                        prompt = post.call_args.args[0]["messages"][0]["content"]
+                        self.assertIn(builtin.data["persona"].splitlines()[0], prompt)
+                        self.assertEqual("【英语原声对白范例】" in prompt, lang == "en")
+                        self.assertEqual("Heh. Ciao, Doctor." in prompt, lang == "en")
+                        self.assertEqual("【意大利语对白范例】" in prompt, lang == "it")
+                        self.assertEqual("Stavolta dai tu le carte." in prompt, lang == "it")
+                        self.assertEqual(answer["segments"], [{lang: line, "zh": "轮到你了。", "emotion": "MOCKING"}])
+
     def test_share_import_and_use_new_persona(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
             role = character("muelsyse")
