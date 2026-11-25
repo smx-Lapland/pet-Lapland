@@ -135,6 +135,8 @@ Remove-Item Env:PET_MODEL_KEY
 - **快速意配**使用 Piper VITS。语速为 0 时保留合成出的音节时长和音高，手动调速由 Piper 在合成阶段完成。勾选「意配使用 VITS 并在播放前复核发音」会用 Whisper 检查读词，偏差较大时再次合成，开口等待也会增加。
 - **原声参考意配**使用 Qwen3-TTS 0.6B，按情绪选取意大利语演员的原声和对应台词来生成新句。语速设为 **0** 时按模型原速播放。系统参照原配音节间的响度差，在念得较平的短语中加强已有重音、收轻相邻弱音。生成语音中，超过 0.8 秒且几乎没有声音的内部间隔会收短至约半秒，正常换气和短停顿保留。手动调整语速会启用变速处理。
 
+**意配试听基准（2026-11-25 确认）**　这句调侃使用原声参考模型，语速为 0，全长 6.06 秒。后续调整重音或语气时，用同一句对照电音感和断句，尤其留意最后的 *un capolavoro di precisione* 能否顺着前半句说下来。[播放已确认的意配样本](https://github.com/smx-Lapland/pet-Lapland/blob/ee45cdbf824c4cef11e4f3fe30a09706aef4b491/docs/dialogue-preview.wav)
+
 安装过上一节的意配录音后，在有兼容 NVIDIA GPU 的 Windows 机器上运行下方命令。模型权重约 2.5 GB，脚本另建 PyTorch 环境。完成后选择「GPU 优先」，勾选「意配使用原声参考模型」，并关闭 VITS 发音复核。首次打开对话框时需要加载模型，连续对话可复用。录音、参考特征和生成过程都在本机。GPU 推理失败时使用本地 CPU VITS。[模型说明](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base)
 
 ```powershell
