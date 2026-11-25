@@ -37,10 +37,15 @@ def reference_pause(samples):
     return float(np.clip(np.median(gaps), .12, .85)) if gaps.size else .15
 
 
-def follow_contour(audio, reference):
+def follow_contour(audio, reference, tempo=1.):
+    if len(reference) < 12 and tempo == 1.:
+        return audio
     times, notes = pitch_track(audio)
     if len(notes) < 12 or len(reference) < 12:
-        return audio
+        if tempo == 1. or len(audio) < RATE // 10:
+            return audio
+        sound = parselmouth.Sound(audio, RATE)
+        return call(sound, "Lengthen (overlap-add)", 80, 620, 1 / tempo).values[0].astype(np.float32)
     # Guide the overall arc using the reference, retaining local syllable stresses.
     knots = np.linspace(0, 1, 7)
     phase = np.linspace(0, 1, len(notes))
@@ -59,6 +64,10 @@ def follow_contour(audio, reference):
     for t, hz in zip(times, target):
         call(tier, "Add point", t, hz)
     call([tier, manip], "Replace pitch tier")
+    if tempo != 1.:
+        duration = call("Create DurationTier", "tempo", 0, sound.duration)
+        call(duration, "Add point", sound.duration / 2, 1 / tempo)
+        call([duration, manip], "Replace duration tier")
     return call(manip, "Get resynthesis (overlap-add)").values[0].astype(np.float32)
 
 
@@ -117,9 +126,13 @@ class ReferenceVoice:
         return pitch_track(reference)[1], reference_pause(reference)
 
     def convert(self, audio, emotion):
-        return self.converter.run(None, {"source": spectrum(audio), "target": self.targets[emotion]})[0][0, 0]
+        converted = self.converter.run(None, {"source": spectrum(audio), "target": self.targets[emotion]})[0][0, 0]
+        if self.language == "it":
+            from .neural_worker import reduce_decoder_tones
+            return reduce_decoder_tones(converted, RATE)
+        return converted
 
-    def generate(self, text, emotion="NEUTRAL", rate=0, *, contour=True):
+    def generate(self, text, emotion="NEUTRAL", rate=0, *, contour=True, tempo=1.):
         from piper.config import SynthesisConfig
         from .neural_worker import emphasize_syllables, trim_phrase_join
 
@@ -142,7 +155,7 @@ class ReferenceVoice:
             if len(audio) < 512:
                 continue
             converted = self.convert(audio, emotion)
-            phrase = follow_contour(converted, reference_pitch) if contour else converted
+            phrase = follow_contour(converted, reference_pitch if contour else (), tempo)
             if stress_db:
                 phrase = emphasize_syllables(phrase, RATE, stress_db)
             if english:
@@ -153,7 +166,7 @@ class ReferenceVoice:
                 if not english:
                     parts[-1] = trim_phrase_join(parts[-1], RATE, False, True)
                     phrase = trim_phrase_join(phrase, RATE, True, False)
-                parts.append(np.zeros(round(RATE * next_pause), np.float32))
+                parts.append(np.zeros(round(RATE * next_pause / tempo), np.float32))
             parts.append(phrase)
             ending = "".join(chunk.phonemes).rstrip()
             if emotion == "MOCKING":
@@ -173,21 +186,21 @@ class ReferenceVoice:
             raise ValueError("Invalid speech waveform")
         return output * (.94 / np.max(np.abs(output)))
 
-    def render(self, text, emotion=None):
+    def render(self, text, emotion=None, *, verify=True, tempo=1.):
         emotion = emotion if emotion in self.targets else "NEUTRAL"
-        primary = self.generate(text, emotion)
-        if self.language != "it" or not all((MODEL_DIR / f).is_file() for f in FILES):
+        primary = self.generate(text, emotion, tempo=tempo)
+        if not verify or self.language != "it" or not all((MODEL_DIR / f).is_file() for f in FILES):
             return primary
         expected = words(text)
         if not expected:
             return primary
         try:
-            return self.check_italian(primary, text, expected, emotion)
+            return self.check_italian(primary, text, expected, emotion, tempo)
         except (OSError, ImportError, RuntimeError, ValueError):
             # The first take is already usable if optional verification assets fail.
             return primary
 
-    def check_italian(self, primary, text, expected, emotion):
+    def check_italian(self, primary, text, expected, emotion, tempo=1.):
         if self.recognizer is None:
             self.recognizer = load_recognizer("it")
 
@@ -207,7 +220,7 @@ class ReferenceVoice:
         pitch, pause = self.reference(emotion)
         spoken, rate = synthesize_pocket(text, "it", emotion, pause)
         native = resample(spoken, rate, RATE)
-        directed = follow_contour(self.convert(native, emotion), pitch)
+        directed = follow_contour(self.convert(native, emotion), pitch, tempo)
         candidate_errors = errors(directed)
         # Small transcription differences are common even on the original recordings.
         # Keep the Piper performance unless the converted retry recovers multiple words.

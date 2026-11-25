@@ -16,6 +16,7 @@
   "speech_provider": "lapland",
   "voice_device": "auto",
   "speech_language": "en",
+  "mic_language": "zh",
   "mic_threshold": "较高",
   "neural_voice": "en-US-JennyNeural",
   "neural_voice_it": "it-IT-ElsaNeural",
@@ -28,6 +29,8 @@
   "save_captures": false,
   "save_history": true,
   "reasoning_effort": "low",
+  "verify_italian_voice": false,
+  "italian_reference_voice": false,
   "hotkeys": {
     "capture": "ctrl+alt+s",
     "ask": "ctrl+alt+space",

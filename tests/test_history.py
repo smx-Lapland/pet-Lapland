@@ -4,10 +4,29 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from pet.history import ConversationHistory
+from pet.history import ConversationHistory, recent_messages
 
 
 class HistoryTest(unittest.TestCase):
+    def test_recall_is_scoped_to_the_current_exchange(self):
+        history = [{"role": "user", "content": "车票怎么退？"}, {"role": "assistant", "content": "看订单。"},
+                   {"role": "user", "content": "我的铅笔掉地上了。"}, {"role": "assistant", "content": "在桌脚旁。"}]
+        def recent(q, screenshot=False, follow_up=False):
+            return recent_messages(history, q, screenshot=screenshot, follow_up=follow_up)
+        self.assertEqual(recent("这朵花叫什么？"), [])
+        self.assertEqual(recent("还有呢？"), history[-2:])
+        self.assertEqual(recent("铅笔是什么颜色？"), history[-2:])
+        self.assertEqual(recent("上次说过什么？"), history)
+        self.assertEqual(recent("这是什么？", True, False), [])
+        self.assertEqual(recent("看它左边。", True, True), history)
+        self.assertEqual(recent("换个话题，那你怎么看？", True, True), [])
+
+    def test_recent_dialogue_keeps_the_spoken_words_and_technical_subtitle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = ConversationHistory(Path(folder) / "history.db")
+            store.append("a", "线索", "再说一次\n\nA clue · 线索\n\nTry port eighty.\n试试端口 80。", "再说一次")
+            self.assertEqual(store.recent_context()[1][-1]["content"], "Try port eighty.\n试试端口 80。")
+
     def test_resume_legacy_and_roll_forward_once(self):
         with tempfile.TemporaryDirectory() as folder:
             store = ConversationHistory(Path(folder) / "history.db")
@@ -44,6 +63,7 @@ class HistoryTest(unittest.TestCase):
             store.remember(note)
             reopened = ConversationHistory(store.path)
             self.assertEqual(reopened.relevant_notes("我的名字是什么？"), [note])
+            self.assertEqual(reopened.relevant_notes("我的车票多少钱？"), [])
             reopened.forget(reopened.memories()[0][0])
             self.assertEqual(store.memories(), [])
 

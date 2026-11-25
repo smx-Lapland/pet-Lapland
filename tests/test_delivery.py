@@ -30,6 +30,15 @@ ANSWER = {"headline_en": "Test card", "headline_zh": "测试卡",
 
 
 class StreamTest(unittest.TestCase):
+    def test_screen_and_explicit_reasoning_keep_the_configured_effort(self):
+        for image, effort in ((Image.new("RGB", (8, 8)), "low"), (None, "high")):
+            client = DeepSeekClient({"_api_key": "test", "reasoning_effort": effort})
+            with patch.object(client, "_post", return_value={"choices": [{"message": {"content": json.dumps(ANSWER)}}]}) as post:
+                client.ask(image, "test")
+            payload = post.call_args.args[0]
+            self.assertNotIn("thinking", payload)
+            self.assertEqual(payload["reasoning_effort"], effort)
+
     def test_direction_is_inherited_without_becoming_speech_or_subtitles(self):
         rows = [{"en": "[MOCKING] [chuckles] Bravo, Dr. Grey. 12%!", "zh": "[MOCKING] 好，12%！"},
                 {"en": "[MANIC] (whispers) Try again~.", "zh": "再试试。"}]
@@ -42,6 +51,10 @@ class StreamTest(unittest.TestCase):
         self.assertEqual(normalize_answer({"answer": "[UNKNOWN] Try it."})["segments"][0]["en"], "Try it.")
         line = normalize_answer({"segments": [{"it": "[WHISPER] Vieni qui.", "zh": "过来。"}]}, "it")
         self.assertEqual(line["segments"][0], {"it": "Vieni qui.", "zh": "过来。", "emotion": "WHISPER"})
+        corrected = normalize_answer({"it": "[SHARP] (sospira) Salva il file.",
+                                      "zh": "保存 `my_file[0]`，保留 {name}。"}, "it")
+        self.assertEqual(corrected["segments"][0], {"it": "Salva il file.", "emotion": "NEUTRAL",
+                                                   "zh": "保存 my_file[0]，保留 {name}。"})
 
     def lines(self, pieces):
         for piece in pieces:
@@ -101,6 +114,111 @@ class StreamTest(unittest.TestCase):
 
 
 class VoiceTest(unittest.TestCase):
+    def test_review_plays_one_file_for_both_languages(self):
+        import struct
+        import wave
+        import winsound
+        from tools.evaluate_dialogue import play_review_preview
+        with tempfile.TemporaryDirectory() as tmp, patch.object(winsound, "PlaySound") as play:
+            folder = Path(tmp)
+            (folder / "audio").mkdir()
+            for lang, rate, value in (("en", 32000, 2000), ("it", 22050, -2000)):
+                with wave.open(str(folder / "audio" / f"08-{lang}-1.wav"), "wb") as take:
+                    take.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                    take.writeframes(struct.pack("<h", value) * rate)
+            play_review_preview(folder)
+            target = folder / "preview.wav"
+            play.assert_called_once_with(str(target), winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+            with wave.open(str(target)) as joined:
+                self.assertAlmostEqual(joined.getnframes() / joined.getframerate(), 2.5, places=2)
+                for seconds, expected in ((.5, 2000), (1.25, 0), (2., -2000)):
+                    joined.setpos(int(seconds * joined.getframerate()))
+                    self.assertAlmostEqual(struct.unpack("<h", joined.readframes(1))[0], expected, delta=5)
+
+    def test_reference_italian_route_and_cpu_recovery(self):
+        from pet.speech import SpeechEngine
+
+        with patch("pet.speech.italian_reference.installed_python", return_value=Path(sys.executable)):
+            cfg = {"speech_provider": "vits", "speech_language": "it", "italian_reference_voice": True}
+            engine = SpeechEngine(cfg, Path("unused"))
+            self.assertEqual(Path(engine._neural_command()[1]).name, "italian_reference.py")
+            self.assertEqual(engine._neural_env()["HF_HUB_OFFLINE"], "1")
+            engine._use_cpu_fallback()
+            self.assertEqual(Path(engine._neural_command()[1]).name, "neural_worker.py")
+            for override in ({"voice_device": "cpu"}, {"verify_italian_voice": True}, {"italian_reference_voice": False}):
+                engine = SpeechEngine({**cfg, **override}, Path("unused"))
+                self.assertEqual(Path(engine._neural_command()[1]).name, "neural_worker.py")
+
+    def test_mixed_dictation_preserves_paths_and_routes_inputs_independently(self):
+        import numpy as np
+        from pet.voice_input import VoiceInput, normalize_mixed_dictation
+
+        self.assertEqual(normalize_mixed_dictation("到gitthub检查github.com和Pythonic"),
+                         "到GitHub检查github.com和Pythonic")
+        self.assertEqual(normalize_mixed_dictation("the deep sea"), "the deep sea")
+        signal = np.full(16000, 2000, np.int16)
+        with patch("pet.voice_input.SENSEVOICE_DIR") as folder, \
+             patch("sherpa_onnx.OfflineRecognizer.from_sense_voice") as sense, \
+             patch("pet.voice_input.load_recognizer") as whisper, \
+             patch("pet.voice_input.recognize_audio", return_value="看看github") as decode:
+            folder.__truediv__.return_value.is_file.return_value = True
+            self.assertEqual(VoiceInput().transcribe(signal, threading.Event()), "看看GitHub")
+            self.assertIs(decode.call_args.args[0], sense.return_value)
+            VoiceInput("it").transcribe(signal, threading.Event())
+            whisper.assert_called_once_with("it")
+            folder.__truediv__.return_value.is_file.return_value = False
+            VoiceInput().transcribe(signal, threading.Event())
+            whisper.assert_called_with("zh")
+            VoiceInput("auto").transcribe(signal, threading.Event())
+            whisper.assert_called_with("")
+
+    def test_italian_vits_changes_duration_with_the_pitch_contour(self):
+        import numpy as np
+        from pet.vits_voice import RATE, follow_contour, pitch_track
+
+        audio = .2 * np.sin(2 * np.pi * 180 * np.arange(2 * RATE) / RATE)
+        _, pitch = pitch_track(audio)
+        for tempo in (1.08, 1.36):
+            result = follow_contour(audio, pitch, tempo)
+            self.assertAlmostEqual(len(result) / RATE, 2 / tempo, delta=.02)
+            self.assertAlmostEqual(np.median(pitch_track(result)[1]), np.median(pitch), delta=.15)
+
+    def test_generated_italian_tempo_preserves_voiced_pitch(self):
+        import wave
+        import numpy as np
+        from pet.neural_worker import write_voice_wav
+
+        rate = 22050
+        samples = .2 * np.sin(2 * np.pi * 180 * np.arange(2 * rate) / rate)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "line.wav"
+            for italian, tempo in ((False, 1.), (True, 1.08)):
+                write_voice_wav(path, samples, rate, 0, italian_dialogue=italian)
+                with wave.open(str(path)) as wav:
+                    signal = np.frombuffer(wav.readframes(wav.getnframes()), "<i2")
+                    self.assertEqual(wav.getframerate(), rate)
+                self.assertAlmostEqual(len(signal) / rate, 2 / tempo, delta=.02)
+                middle = signal[rate // 4:rate * 5 // 4]
+                self.assertAlmostEqual(np.abs(np.fft.rfft(middle)).argmax(), 180, delta=2)
+
+    def test_italian_live_voice_uses_one_take_unless_verification_is_enabled(self):
+        from pet.speech import SpeechEngine
+        from pet.vits_voice import ReferenceVoice
+
+        voice = object.__new__(ReferenceVoice)
+        voice.language, voice.targets = "it", {"MOCKING": None}
+        for verify in (False, True):
+            engine = SpeechEngine({"speech_provider": "vits", "speech_language": "it",
+                                   "verify_italian_voice": verify}, Path("unused"))
+            with patch.object(voice, "generate", return_value="primary") as generate, \
+                 patch.object(voice, "check_italian", return_value="checked") as check, \
+                 patch("pet.vits_voice.FILES", []):
+                flag = engine._neural_env()["PET_VERIFY_ITALIAN"] == "1"
+                audio = voice.render("Giochiamo?", "MOCKING", verify=flag)
+                generate.assert_called_once_with("Giochiamo?", "MOCKING", tempo=1.)
+                self.assertEqual(check.call_count, int(verify))
+                self.assertEqual(audio, "checked" if verify else "primary")
+
     def test_failed_gpu_retries_same_voice_on_cpu(self):
         import wave
         from pet.speech import SpeechEngine
@@ -628,6 +746,24 @@ class DesktopTest(unittest.TestCase):
             self.assertEqual(spoken, [answer["segments"][0]["it"]])
             self.assertEqual(self.app.captions.tracks[1].itemcget(self.app.captions.rows[1], "text"), answer["segments"][0]["zh"])
             self.assertIn(spoken[0], self.app.transcript[-1])
+
+    def test_new_capture_cannot_import_the_previous_topic_from_the_archive(self):
+        app = self.app
+        app.cfg["save_history"] = True
+        seen = []
+        def answer(image, question, history, follow_up, on_first, context=None):
+            seen.append((history, context))
+            return ANSWER
+        app.client.ask = answer
+        with patch.object(app.archive, "handoff", return_value={"交接摘要": "旧图内容"}) as recall, \
+             patch.object(app.archive, "relevant_notes", return_value=["旧笔记"]) as notes:
+            app._send_capture(Image.new("RGB", (24, 24), "blue"))
+            self.until(lambda: not app.awaiting_answer)
+            app._send_capture(Image.new("RGB", (24, 24), "red"))
+            self.until(lambda: not app.awaiting_answer)
+            self.assertEqual(seen, [([], None), ([], None)])
+            recall.assert_not_called()
+            notes.assert_not_called()
 
     def test_gpu_renderer_is_reused_for_input_and_released_on_hide(self):
         app = self.app

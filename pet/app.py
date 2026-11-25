@@ -25,7 +25,7 @@ from . import dsh_tasks
 from .dsh_projects import project_context, projects
 from .task_dialog import TaskDialog
 from .dialogs import CapturePreview, HistoryDialog, MemoryDialog, SettingsDialog
-from .history import ConversationHistory
+from .history import ConversationHistory, changes_subject, recent_messages, requests_recall
 from .hotkeys import HotkeyManager
 from .llm import DeepSeekClient, LLMError
 from .screen import (
@@ -104,7 +104,7 @@ class MochiApp:
         self.events: queue.Queue = queue.Queue()
         self.client = DeepSeekClient(cfg)
         self.speech = SpeechEngine(cfg, Path(__file__).with_name("tts_worker.ps1"))
-        self.voice_input = VoiceInput()
+        self.voice_input = VoiceInput(cfg.get("mic_language", "zh"))
         self.voice_turn: threading.Event | None = None
         self.conversation: SpeechGate | None = None
 
@@ -665,6 +665,9 @@ class MochiApp:
         if "api_base" in values or "model_key_env" in values:
             apply_credentials(cfg)
         save_config(cfg)
+        if cfg.get("mic_language", "zh") != self.cfg.get("mic_language", "zh"):
+            self._cancel_voice_input()
+            self.voice_input = VoiceInput(cfg["mic_language"])
         if scope_changed or route_changed:
             self._cancel_voice_input()
             self.request_seq += 1
@@ -1192,6 +1195,12 @@ class MochiApp:
     # ---------- model ----------
 
     def _start_ask(self, image, question: str, follow_up: bool, *, from_conversation=False) -> None:
+        if changes_subject(question):
+            self.last_image = image = None
+            self.history.clear()
+            self.transcript.clear()
+            self.topic = uuid.uuid4().hex
+            follow_up = False
         self._open_panel()
         if not from_conversation:
             self._cancel_voice_input()
@@ -1220,12 +1229,16 @@ class MochiApp:
             return
         self.awaiting_answer = True
         self.stream_started = False
-        history = list(self.history)
+        history = recent_messages(self.history, question, screenshot=image is not None, follow_up=follow_up)
+        fresh_capture = image is not None and not follow_up
+        context = {}
         try:
-            context = self.archive.handoff(self.topic, len(history)//2) if self.cfg["save_history"] else {}
-            notes = self.archive.relevant_notes(question)
-            if notes:
-                context["用户指定的长期记忆"] = notes
+            if not fresh_capture and not changes_subject(question):
+                if self.cfg["save_history"] and requests_recall(question):
+                    context = self.archive.handoff(self.topic, len(history)//2)
+                notes = self.archive.relevant_notes(question)
+                if notes:
+                    context["用户指定的长期记忆"] = notes
         except (OSError, sqlite3.Error, ValueError):
             context = {}
             log.warning("Could not load conversation memory")
@@ -1292,7 +1305,7 @@ class MochiApp:
             self._present_answer(answer)
         self.history.extend([
             {"role": "user", "content": self.pending_question},
-            {"role": "assistant", "content": " ".join(s["zh"] or s[self.spoken_key] for s in answer["segments"])},
+            {"role": "assistant", "content": "\n".join(filter(None, (self.spoken_text, self.translated_text)))},
         ])
         self.history = self.history[-6:]
         lines = [self.pending_question, answer["headline_" + self.spoken_key] + " · " + answer["headline_zh"]]
@@ -1344,7 +1357,9 @@ class MochiApp:
                 return
             try:
                 direction = {"emotion": emotion} if emotion else {}
+                started = time.monotonic()
                 path, used = speech.prepare_segment(text, stop_event, speech.provider, **direction)
+                log.info("voice prepared in %.2fs provider=%s", time.monotonic() - started, used)
                 duration = wav_duration(path) if path else subtitle_duration(text)
             except Exception as exc:
                 log.warning("voice unavailable (%s)", type(exc).__name__)

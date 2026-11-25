@@ -14,12 +14,53 @@ def token_estimate(text):
     return (ascii_count + 3) // 4 + len(text) - ascii_count
 
 
-def compact_turn(body, length):
+_COMMON_WORDS = frozenset((
+    "我的 你的 这个 那个 一个 一下 什么 怎么 如何 可以 觉得 现在 时候 我们 你们 的是 的吗 帮我 看看 一点 告诉 我想 我是 这是 有点 请问 帮忙 "
+    "the is are was were what why how my your about this that and for you can me do to of in it i a does please "
+    "il la lo le un una di si per che come mi tu io"
+).split())
+
+
+def _terms(text):
+    text = text.casefold()
+    words = set(re.findall(r"[a-zà-öø-ÿ0-9]+", text) + re.findall(r"(?=([\u3400-\u9fff]{2}))", text))
+    return words - _COMMON_WORDS
+
+
+def changes_subject(question):
+    return bool(re.search(r"换(?:个|一个)?话题|另一个问题|别提(?:刚才|上次)|不要(?:再)?(?:联系|参考|回顾)(?:之前|上次)|"
+                          r"\b(?:new topic|change the subject|cambiamo (?:argomento|discorso))\b", question, re.I))
+
+
+def requests_recall(question):
+    return bool(re.search(r"还记得|回顾|记得.{0,8}(?:说过|提过|聊过)|(?:上次|之前|以前|先前|刚才).{0,8}(?:说|聊|提|谈|约定)|"
+                          r"\b(?:last time|do you remember|we discussed|ti ricordi|l.altra volta)\b", question, re.I))
+
+
+def recent_messages(history, question, *, screenshot, follow_up):
+    if changes_subject(question):
+        return []
+    if screenshot:
+        return history[-6:] if follow_up else []
+    if requests_recall(question):
+        return history[-6:]
+    pair = history[-2:]
+    refers_back = re.search(r"^(?:那(?:么|呢|你呢|怎么办|然后)|所以|然后呢|为什么[呢呀？?]*$|继续|再说|还有呢|对了刚才|它|他呢|她呢|确实|没错|"
+                            r"(?:why|perché)[?!.\s]*$|\b(?:go on|tell me more|what about that|and then|e poi|continua)\b)",
+                            question, re.I)
+    if refers_back or _terms(question) & _terms(" ".join(m["content"] for m in pair)):
+        return pair
+    return []
+
+
+def compact_turn(body, length, *, include_spoken=False):
     question, _, rest = body.partition("\n\n")
     if length is not None:
         question, rest = body[:length], body[length:].lstrip("\n")
     # Archive paragraphs contain spoken text followed by its Chinese translation.
     paragraphs = rest.split("\n\n")
+    if include_spoken and " · " in paragraphs[0] and len(paragraphs) > 1:
+        return question, "\n".join(paragraphs[1:]).strip()
     answer = " ".join(part.strip().rsplit("\n", 1)[-1] for part in (paragraphs[1:] or paragraphs) if part.strip())
     return question, answer or rest
 
@@ -75,7 +116,7 @@ class ConversationHistory:
                 ORDER BY id DESC LIMIT 3""").fetchall()
         messages, transcript = [], []
         for _, body, length in reversed(rows):
-            question, reply = compact_turn(body, length)
+            question, reply = compact_turn(body, length, include_spoken=True)
             transcript.append(body)
             if question and reply:
                 messages.extend([{"role": "user", "content": question}, {"role": "assistant", "content": reply}])
@@ -90,13 +131,12 @@ class ConversationHistory:
             return db.execute("SELECT id, note FROM memories ORDER BY id DESC").fetchall()
 
     def relevant_notes(self, question):
-        def terms(text):
-            text = text.casefold()
-            return set(re.findall(r"[a-z0-9]+", text) + re.findall(r"(?=([\u3400-\u9fff]{2}))", text))
-        asked = terms(question)
-        rows = sorted(self.memories(), key=lambda r: len(terms(r[1]) & asked), reverse=True)
+        asked = _terms(question)
+        scored = [(len(_terms(note) & asked), note_id, note) for note_id, note in self.memories()]
         result, remaining = [], 480
-        for _, note in rows:
+        for score, _, note in sorted(scored, reverse=True)[:2]:
+            if not score:
+                break
             cost = token_estimate(note)
             if cost <= remaining:
                 result.append(note)

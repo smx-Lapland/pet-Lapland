@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,13 +28,37 @@ class CharacterTest(unittest.TestCase):
                         content = json.dumps({lang: "[MOCKING] " + line, "zh": "轮到你了。"})
                         with patch.object(client, "_post", return_value={"choices": [{"message": {"content": content}}]}) as post:
                             answer = client.ask(None, "换你啦")
-                        prompt = post.call_args.args[0]["messages"][0]["content"]
+                        payload = post.call_args.args[0]
+                        messages = payload["messages"]
+                        prompt = messages[0]["content"]
+                        self.assertEqual(payload["thinking"], {"type": "disabled"})
+                        self.assertNotIn("reasoning_effort", payload)
                         self.assertIn(builtin.data["persona"].splitlines()[0], prompt)
                         self.assertEqual("【英语原声对白范例】" in prompt, lang == "en")
-                        self.assertEqual("Heh. Ciao, Doctor." in prompt, lang == "en")
+                        self.assertNotIn("Heh. Ciao, Doctor.", prompt)
                         self.assertEqual("【意大利语对白范例】" in prompt, lang == "it")
-                        self.assertEqual("Stavolta dai tu le carte." in prompt, lang == "it")
+                        self.assertNotIn('示范 {"user"', prompt)
+                        self.assertIn("换你啦", messages[-1]["content"])
+                        self.assertEqual(payload["temperature"], .8)
+                        self.assertEqual([m["role"] for m in messages[1:-1]], ["user", "assistant"] * 6)
+                        self.assertIn("Italiano parlato" if lang == "it" else "Spoken English", messages[-1]["content"])
+                        for example in messages[2:-1:2]:
+                            fields = json.loads(example["content"])
+                            self.assertEqual(list(fields), [lang, "zh", "headline_" + lang, "headline_zh"])
+                            self.assertTrue(fields[lang].startswith("["))
                         self.assertEqual(answer["segments"], [{lang: line, "zh": "轮到你了。", "emotion": "MOCKING"}])
+
+    def test_original_lines_are_available_on_request_and_screen_has_style_reminder(self):
+        from PIL import Image
+        client = DeepSeekClient({"_api_key": "fixture"})
+        with patch.object(client, "_post", return_value={"choices": [{"message": {
+                "content": json.dumps({"en": "[LOW] Hello."})}}]}) as post:
+            answer = client.ask(Image.new("RGB", (8, 8)), "按原版问候说一遍")
+        messages = post.call_args.args[0]["messages"]
+        self.assertIn("Heh. Ciao, Doctor.", messages[0]["content"])
+        self.assertIn("Spoken English", messages[-1]["content"][0]["text"])
+        self.assertEqual(messages[-1]["content"][1]["type"], "image_url")
+        self.assertEqual(answer["segments"][0]["emotion"], "WHISPER")
 
     def test_share_import_and_use_new_persona(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
@@ -63,6 +88,20 @@ class CharacterTest(unittest.TestCase):
                 self.assertIn("缪尔赛思", prompt)
                 self.assertNotIn("Siracusan", prompt)
                 self.assertNotIn("拉普兰德", prompt)
+                self.assertNotIn("Spoken English.", post.call_args.args[0]["messages"][-1]["content"])
+
+    def test_only_unedited_stock_lapland_pack_inherits_updated_dialogue(self):
+        old = "An old stock persona\nwith two lines"
+        fingerprint = hashlib.sha256(old.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp), \
+                patch("pet.characters._STOCK_LAPLAND_PERSONAS", {fingerprint}):
+            role = character()
+            p = Path(tmp) / "test.petpack"
+            custom = old + " and my own changes"
+            for persona, expected in ((old.replace("\n", "\r\n"), role.data["persona"].strip()), (custom, custom)):
+                write_pack(p, {**role.data, "persona": persona}, {"portrait.png": role.sprite("wait")})
+                loaded = import_pack(p)
+                self.assertEqual(loaded.data["persona"], expected)
 
     def test_invalid_pack_does_not_install(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):

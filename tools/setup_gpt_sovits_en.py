@@ -31,6 +31,10 @@ def main():
     head = subprocess.check_output(["git", "-C", str(engine), "rev-parse", "HEAD"], text=True).strip()
     if head != REV:
         raise SystemExit("已有 GPT-SoVITS 源码版本不同。请先将原 engine 目录备份到其他位置。")
+    patch = str(Path(__file__).resolve().with_name("gpt-sovits-inference.patch"))
+    apply = ["git", "-C", str(engine), "apply"]
+    if subprocess.run([*apply, "--reverse", "--check", "--quiet", patch]).returncode:
+        subprocess.run([*apply, patch], check=True)
     env = ROOT / "venv"
     python = env / "Scripts/python.exe"
     if not python.is_file():

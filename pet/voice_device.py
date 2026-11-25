@@ -10,6 +10,17 @@ DEVICE_LABELS = {"auto": "GPU 优先（自动回退 CPU）", "cpu": "仅 CPU"}
 _dll_directories = []
 
 
+def venv_python(venv):
+    """Return the base executable so cancellation reaches inference directly on Windows."""
+    if (venv / "Scripts/python.exe").is_file():
+        for line in (venv / "pyvenv.cfg").read_text("utf8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home":
+                python = Path(value.strip()) / "python.exe"
+                return python if python.is_file() else None
+    return None
+
+
 def cuda_installed():
     return (CUDA_RUNTIME / "onnxruntime/capi/onnxruntime_providers_cuda.dll").is_file()
 

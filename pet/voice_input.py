@@ -1,6 +1,7 @@
 """Microphone capture, hands-free turn detection, and local transcription."""
 from __future__ import annotations
 
+import re
 import threading
 from array import array
 from collections import deque
@@ -11,7 +12,22 @@ import numpy as np
 RATE = 16000
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "whisper-base"
 FILES = ("base-encoder.int8.onnx", "base-decoder.int8.onnx", "base-tokens.txt")
+SENSEVOICE_DIR = MODEL_DIR.parent / "sensevoice-small"
+SENSEVOICE_FILES = ("model.int8.onnx", "tokens.txt")
+INPUT_LANGUAGES = {"zh": "中文（可夹英文）", "auto": "多语自动识别", "en": "英语", "it": "意大利语"}
 MIC_THRESHOLDS = {"灵敏": -36, "较高": -30, "很高": -24}
+
+
+def normalize_mixed_dictation(text):
+    """Canonicalize standalone project terms in a Mandarin utterance."""
+    if not re.search(r"[\u3400-\u9fff]", text):
+        return text
+    if re.search(r"模型|接入|接口|聊天|推理|项目|部署", text):
+        text = re.sub(r"(?<![\w./-])(?:deepse|deep sick)(?![\w./-])", "DeepSeek", text, flags=re.ASCII | re.I)
+    terms = {"github": "GitHub", "gitthub": "GitHub", "deepseek": "DeepSeek",
+             "python": "Python", "api": "API", "gpu": "GPU", "dsh": "DSH"}
+    return re.sub(r"(?<![\w./-])[a-z]+(?![\w./-])",
+                  lambda m: terms.get(m[0].lower(), m[0]), text, flags=re.ASCII | re.I)
 
 
 class VoiceInputError(Exception):
@@ -125,16 +141,18 @@ def recognize_audio(recognizer, audio, cancelled=None):
 
 
 class VoiceInput:
-    def __init__(self):
+    def __init__(self, language="zh"):
+        self.language = language if language in INPUT_LANGUAGES else "zh"
         self.device = None
         self.samples = array("h")
         self.recognizer = None
+        self.loading = None
         self.decode_lock = threading.Lock()
 
     def start(self, on_samples=None):
         import miniaudio
 
-        if not all((MODEL_DIR / name).is_file() for name in FILES):
+        if not self._use_sensevoice() and not all((MODEL_DIR / name).is_file() for name in FILES):
             raise VoiceInputError("缺少语音识别模型。请运行 tools/setup_voice_input.py 后再试。")
         self.samples = array("h")
         receive = self.samples.extend if on_samples is None else on_samples
@@ -150,6 +168,9 @@ class VoiceInput:
         except Exception as exc:
             self.finish()
             raise VoiceInputError("无法打开麦克风。请检查 Windows 默认输入设备和麦克风权限。") from exc
+        if self.recognizer is None and not (self.loading and self.loading.is_alive()):
+            self.loading = threading.Thread(target=self._warm_up, daemon=True, name="mic-model-load")
+            self.loading.start()
 
     def finish(self):
         if self.device is not None:
@@ -157,6 +178,28 @@ class VoiceInput:
             self.device = None
         samples, self.samples = self.samples, array("h")
         return samples
+
+    def _use_sensevoice(self):
+        return self.language == "zh" and all((SENSEVOICE_DIR / f).is_file() for f in SENSEVOICE_FILES)
+
+    def _load(self):
+        if self.recognizer is not None:
+            return
+        if self._use_sensevoice():
+            import sherpa_onnx
+            model, tokens = (str(SENSEVOICE_DIR / f) for f in SENSEVOICE_FILES)
+            self.recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=model, tokens=tokens, language="zh", use_itn=True, num_threads=2)
+        else:
+            self.recognizer = load_recognizer("" if self.language == "auto" else self.language)
+
+    def _warm_up(self):
+        # Load while the first utterance is being recorded. Decode retries and reports any failure.
+        with self.decode_lock:
+            try:
+                self._load()
+            except (OSError, ImportError, RuntimeError, ValueError):
+                pass
 
     def transcribe(self, samples, cancelled):
         import numpy as np
@@ -171,6 +214,6 @@ class VoiceInput:
         with self.decode_lock:
             if cancelled.is_set():
                 return ""
-            if self.recognizer is None:
-                self.recognizer = load_recognizer()
-            return recognize_audio(self.recognizer, audio, cancelled)
+            self._load()
+            text = recognize_audio(self.recognizer, audio, cancelled)
+            return normalize_mixed_dictation(text) if self.language == "zh" else text

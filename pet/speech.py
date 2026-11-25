@@ -15,6 +15,7 @@ from typing import Any
 
 from .config import CACHE_DIR
 from .gpt_sovits_en import RUNTIME, installed_voice
+from . import italian_reference
 from .voice_device import cuda_installed
 
 log = logging.getLogger("mochi.speech")
@@ -35,16 +36,22 @@ class SpeechEngine:
         self.character_id = cfg.get("character_id", "lapland")
         self.english_bundle = None
         self.english_python = None
+        self.italian_python = None
         if self.provider == "vits" and self.language == "en":
             self.english_bundle, self.english_python = installed_voice(self.character_id)
+        if (self.provider == "vits" and self.language == "it" and cfg.get("italian_reference_voice")
+                and not cfg.get("verify_italian_voice") and cfg.get("voice_device", "auto") == "auto"):
+            self.italian_python = italian_reference.installed_python()
         self.device = ("cuda" if cfg.get("voice_device", "auto") == "auto"
-                       and self.provider in ("lapland", "vits", "piper") and (self.english_bundle or cuda_installed()) else "cpu")
+                       and self.provider in ("lapland", "vits", "piper")
+                       and (self.english_bundle or self.italian_python or cuda_installed()) else "cpu")
         self.gpu_retry_at = None
         self.neural_voice = (cfg.get("neural_voice_it", "it-IT-ElsaNeural") if self.language == "it"
                              else cfg.get("neural_voice", "en-US-JennyNeural"))
         self.rate = int(cfg.get("rate", 0))
         self.api = {k: cfg.get(k, "") for k in ("tts_base", "tts_model", "tts_voice", "tts_key_env")}
         self.muted = bool(cfg.get("muted", False))
+        self.verify_italian_voice = bool(cfg.get("verify_italian_voice", False))
         self.script_path = script_path
         self._powershell = self._find_powershell()
         self._play_lock = threading.Lock()
@@ -56,6 +63,8 @@ class SpeechEngine:
         # Launch the interpreter directly so cancellation also stops native inference.
         if self.english_bundle:
             return [str(self.english_python), str(Path(__file__).with_name("gpt_sovits_en.py"))]
+        if self.italian_python and self.device == "cuda":
+            return [str(self.italian_python), str(Path(__file__).with_name("italian_reference.py"))]
         return [getattr(sys, "_base_executable", None) or sys.executable,
                 str(Path(__file__).with_name("neural_worker.py"))]
 
@@ -65,10 +74,16 @@ class SpeechEngine:
 
     def _neural_env(self):
         env = {**os.environ, "__PYVENV_LAUNCHER__": sys.executable, "PET_TTS_DEVICE": self.device}
+        if self.provider == "vits" and self.language == "it":
+            env["PET_VERIFY_ITALIAN"] = "1" if self.verify_italian_voice else "0"
         if self.english_bundle:
             env.update(__PYVENV_LAUNCHER__=str(RUNTIME / "venv/Scripts/python.exe"),
                        PET_ENGLISH_WEIGHTS=str(self.english_bundle), PYTHONUTF8="1")
-            conda_bin = self.english_python.parent / "Library/bin"
+        elif self.italian_python and self.device == "cuda":
+            env.update(__PYVENV_LAUNCHER__=str(italian_reference.RUNTIME / "venv/Scripts/python.exe"),
+                       HF_HUB_OFFLINE="1", PYTHONUTF8="1")
+        if self.english_bundle or (self.italian_python and self.device == "cuda"):
+            conda_bin = (self.english_python or self.italian_python).parent / "Library/bin"
             if conda_bin.is_dir():
                 env["PATH"] = str(conda_bin) + os.pathsep + env.get("PATH", "")
         return env

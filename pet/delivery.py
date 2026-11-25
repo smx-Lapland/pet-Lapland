@@ -5,11 +5,13 @@ import unicodedata
 from num2words import num2words
 
 EMOTIONS = ("NEUTRAL", "LAZY", "MOCKING", "MANIC", "WHISPER")
-_TAG = re.compile(r"\[(" + "|".join(EMOTIONS) + r")\]", re.I)
+_ALIASES = {"SHARP": "NEUTRAL", "LOW": "WHISPER"}
+_TAG = re.compile(r"\[(" + "|".join((*EMOTIONS, *_ALIASES)) + r")\]", re.I)
 _UNKNOWN_DIRECTION = re.compile(r"^\s*\[[A-Z][A-Z_ -]{1,28}\]\s*")
 _CUE = re.compile(r"(?:\[([^\]]{1,70})\]|\(([^()]{1,70})\)|\*([^*]{1,70})\*)")
 _ACTION = re.compile(r"\b(?:laughs?|laughing|laughter|chuckl\w*|sigh\w*|whisper\w*|scoff\w*|smirk\w*|"
                      r"breathy|sarcastically|drawls?|cackl\w*|grins?|pauses?)\b", re.I)
+_ITALIAN_CUE = re.compile(r"(?:ride|sospira|sussurra|ridacchia|sbuffa)(?: piano| a bassa voce| tra sé)?", re.I)
 
 
 def split_direction(value):
@@ -17,9 +19,11 @@ def split_direction(value):
     tag = _TAG.match(value)
     value = _TAG.sub("", value)
     value = _UNKNOWN_DIRECTION.sub("", value)
-    value = _CUE.sub(lambda m: "" if _ACTION.search(m.group()) else m.group(), value)
+    value = _CUE.sub(lambda m: "" if _ACTION.search(m.group()) or
+                     _ITALIAN_CUE.fullmatch(m.group()[1:-1].strip()) else m.group(), value)
     value = "".join(ch for ch in value if unicodedata.category(ch) != "So" and ch not in "~\ufe0f\u200d")
-    return (tag[1].upper() if tag else None), value.strip()
+    mood = tag[1].upper() if tag else None
+    return _ALIASES.get(mood, mood), value.strip()
 
 
 def spoken_english(text):

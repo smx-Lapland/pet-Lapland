@@ -33,6 +33,7 @@ DEFAULTS: dict[str, Any] = {
     "speech_provider": "lapland",
     "voice_device": "auto",
     "speech_language": "en",
+    "mic_language": "zh",
     "mic_threshold": "较高",
     "neural_voice": "en-US-JennyNeural",
     "neural_voice_it": "it-IT-ElsaNeural",
@@ -45,6 +46,8 @@ DEFAULTS: dict[str, Any] = {
     "save_captures": False,
     "save_history": True,
     "reasoning_effort": "low",
+    "verify_italian_voice": False,
+    "italian_reference_voice": False,
     "hotkeys": {
         "capture": "ctrl+alt+s",
         "ask": "ctrl+alt+space",

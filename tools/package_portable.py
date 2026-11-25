@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from pet.characters import character, image_files, write_pack
 from pet.gpt_sovits_en import BUNDLE
-from pet.voice_input import FILES, MODEL_DIR
+from pet.voice_input import FILES, MODEL_DIR, SENSEVOICE_DIR, SENSEVOICE_FILES
 
 
 def distribution_files():
@@ -69,6 +69,8 @@ def build():
                         z.write(p, p.relative_to(ROOT).as_posix())
             for name in FILES:
                 z.write(MODEL_DIR / name, "models/whisper-base/" + name)
+            for name in (*SENSEVOICE_FILES, "LICENSE"):
+                z.write(SENSEVOICE_DIR / name, "models/sensevoice-small/" + name)
             z.write(ROOT / "LICENSE", "LICENSE")
             z.write(role.folder / "artwork.md", "assets/characters/muelsyse/artwork.md")
             z.write(ROOT / "docs/portable-start.md", "开始使用.md")

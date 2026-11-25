@@ -1,4 +1,5 @@
 """Offline English GPT-SoVITS v2 worker for Lapland's portable tensor bundle."""
+import inspect
 import json
 import os
 import re
@@ -18,18 +19,15 @@ LEXICON = {"ehi": "EY1", "ciao": "CH AW1", "bravo": "B R AA1 V OW0", "bene": "B 
 
 def installed_voice(character_id):
     from .characters import character
+    from .voice_device import venv_python
 
     try:
         folder = RUNTIME / "active" if character_id == "lapland" else character(character_id).folder
         bundle = folder / BUNDLE
-        venv = RUNTIME / "venv"
-        if bundle.is_file() and (venv / "Scripts/python.exe").is_file():
-            for line in (venv / "pyvenv.cfg").read_text("utf8").splitlines():
-                key, _, value = line.partition("=")
-                if key.strip() == "home":
-                    python = Path(value.strip()) / "python.exe"
-                    if python.is_file():
-                        return bundle, python
+        if bundle.is_file():
+            python = venv_python(RUNTIME / "venv")
+            if python:
+                return bundle, python
     except (OSError, ValueError):
         pass
     return None, None
@@ -88,7 +86,9 @@ class EnglishVoice:
                                       n_speakers=cfg["data"]["n_speakers"], version="v2", **cfg["model"])
         del self.vocoder.enc_q
         semantic_cfg = yaml.safe_load((modules / "configs/s1longer-v2.yaml").read_text("utf8"))
-        self.gpt = Text2SemanticDecoder(config=semantic_cfg, top_k=3)
+        # Older installations also work. The patched runtime skips training metrics at startup.
+        options = {"with_accuracy": False} if "with_accuracy" in inspect.signature(Text2SemanticDecoder).parameters else {}
+        self.gpt = Text2SemanticDecoder(config=semantic_cfg, top_k=3, **options)
         with safe_open(str(bundle), framework="pt", device="cpu") as f:
             if (f.metadata() or {}).get("format") != FORMAT:
                 raise ValueError("Invalid English voice weights")

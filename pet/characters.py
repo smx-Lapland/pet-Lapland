@@ -1,5 +1,6 @@
 """Portable, data-only characters and their explicitly shareable settings."""
 import io
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,13 @@ MAX_FILE = 12 * 1024 * 1024
 MODEL_FILES = {"voice.onnx", "voice.onnx.json"}
 MAX_MODEL = 256 * 1024 * 1024
 VOICE_LIMITS = {"voice.onnx": MAX_MODEL, "voice.onnx.json": 256000, BUNDLE: 288 * 1024 * 1024}
+
+# Exact stock text shipped in previous Lapland packs, including the local bilingual edition.
+_STOCK_LAPLAND_PERSONAS = {
+    "1acad74acd52faac007e60e33d06d1e49a001135e14601577da1e757fe4f9810",
+    "07f38add08b78351abafe44650b71abc492f4ad56337c50b0bc89c77030f674e",
+    "900ef52eec9d788747e72e9c161de7cbc5bd59266bdf95ab5df5f1489b36122d",
+}
 
 
 def library():
@@ -83,7 +91,12 @@ def character(key="lapland"):
     if key != "muelsyse" and not re.fullmatch(r"[0-9a-f]{32}", str(key)):
         raise ValueError("角色编号无效。")
     folder = APP_DIR / "assets/characters/muelsyse" if key == "muelsyse" else library() / key
-    return Character(key, folder, clean_manifest(json.loads((folder / "character.json").read_text("utf-8-sig"))))
+    data = clean_manifest(json.loads((folder / "character.json").read_text("utf-8-sig")))
+    if data["name_en"] == "Lapland":
+        fingerprint = hashlib.sha256(data["persona"].replace("\r\n", "\n").encode()).hexdigest()
+        if fingerprint in _STOCK_LAPLAND_PERSONAS:
+            data["persona"] = character("lapland").data["persona"].strip()
+    return Character(key, folder, data)
 
 
 def available_characters():

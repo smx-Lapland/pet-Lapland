@@ -11,7 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageTk
 
 from .hotkeys import parse_hotkey
-from .voice_input import MIC_THRESHOLDS
+from .voice_input import INPUT_LANGUAGES, MIC_THRESHOLDS
 from .voice_device import DEVICE_LABELS
 
 
@@ -167,6 +167,7 @@ class SettingsDialog(tk.Toplevel):
         fields = [
             ("model", "视觉模型", cfg["model"]),
             ("speech_language", "回答和朗读语言", "意大利语" if cfg.get("speech_language") == "it" else "英语"),
+            ("mic_language", "麦克风输入语言", INPUT_LANGUAGES.get(cfg.get("mic_language"), INPUT_LANGUAGES["zh"])),
             ("mic_threshold", "连续对话收音门槛", cfg.get("mic_threshold", "较高")),
             ("speech_provider", "语音服务", cfg["speech_provider"]),
             ("voice_device", "本地神经语音运算", DEVICE_LABELS.get(cfg.get("voice_device"), DEVICE_LABELS["auto"])),
@@ -193,16 +194,20 @@ class SettingsDialog(tk.Toplevel):
                 widget = ttk.Combobox(body, textvariable=var, values=tuple(DEVICE_LABELS.values()), state="readonly")
             elif key == "mic_threshold":
                 widget = ttk.Combobox(body, textvariable=var, values=tuple(MIC_THRESHOLDS), state="readonly")
+            elif key == "mic_language":
+                widget = ttk.Combobox(body, textvariable=var, values=tuple(INPUT_LANGUAGES.values()), state="readonly")
             else:
                 widget = ttk.Entry(body, textvariable=var, width=30)
             widget.grid(row=row, column=1, sticky="ew")
         row = len(fields)
         for key, label in [("confirm_capture", "每次框选后预览确认"), ("stream", "流式回答，台词就绪即朗读"),
+                             ("italian_reference_voice", "意配使用原声参考模型（需安装，本机 GPU）"),
+                             ("verify_italian_voice", "意配使用 VITS 并在播放前复核发音（等待更久）"),
                            ("muted", "静音，仅显示字幕"), ("save_history", "在本机保存新对话的文字记录")]:
             var = self.fields[key] = tk.BooleanVar(self, value=cfg[key])
             ttk.Checkbutton(body, text=label, variable=var).grid(row=row, columnspan=2, sticky="w")
             row += 1
-        ttk.Label(body, wraplength=375, text="vits 和 lapland 分别用 Piper 和 PocketTTS 在本机朗读，按台词情绪选择角色原声。Edge 和 Azure 会将口播文本发给微软。"
+        ttk.Label(body, wraplength=375, text="vits 意配可选快速合成或原声参考模型。lapland 使用 PocketTTS。Edge 和 Azure 会将口播文本发给微软。"
                   "Azure 需要 SPEECH_KEY 和 SPEECH_REGION 环境变量。").grid(row=row, columnspan=2, sticky="w", pady=6)
         self.error = ttk.Label(body, foreground="#A12622", wraplength=375)
         self.error.grid(row=row+1, columnspan=2, sticky="w")
@@ -217,6 +222,7 @@ class SettingsDialog(tk.Toplevel):
     def apply(self):
         values = {key: var.get() for key, var in self.fields.items()}
         values["speech_language"] = "it" if values["speech_language"] == "意大利语" else "en"
+        values["mic_language"] = next(k for k, label in INPUT_LANGUAGES.items() if label == values["mic_language"])
         values["voice_device"] = "cpu" if values["voice_device"] == DEVICE_LABELS["cpu"] else "auto"
         try:
             values["model"] = values["model"].strip()

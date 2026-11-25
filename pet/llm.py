@@ -23,7 +23,7 @@ log = logging.getLogger("mochi.llm")
 
 SYSTEM_PROMPT = """You are the desktop companion in pet-Lapland.
 Use the character direction above for conversation, screenshot explanations, and follow-ups.
-If no screenshot is attached, respond to the user's words and the recent exchange.
+Respond to the current question. Use earlier conversation only to resolve an actual reference or continue the same subject.
 
 When explaining a screenshot or helping with a task:
 - Say what is there, what it means, and the single most useful next action.
@@ -36,8 +36,8 @@ When explaining a screenshot or helping with a task:
 
 Voice and subtitle rules:
 - Prefix the {spoken} string with exactly one delivery tag followed by a space.
-  Pick [LAZY] for languid boredom, [MOCKING] for teasing praise, [MANIC] for delighted excitement,
-  [WHISPER] for a quiet aside or a moment of closeness, and [NEUTRAL] for a steady, direct answer.
+  Pick [LAZY] for idle banter, [MOCKING] for deliberate irony, [MANIC] for rare, genuine thrills,
+  [WHISPER] for a private warning or quiet closeness, and [NEUTRAL] for a blunt correction or serious help.
   Choose the tag anew on every turn, even when the conversation history contains only subtitles.
   Keep titles and translations free of tags.
 - Write one to four spoken sentences. Spell out numbers and abbreviations for the voice.
@@ -45,10 +45,10 @@ Voice and subtitle rules:
   Mark a change of pace with a comma, an ellipsis or a dash. Use pronounceable laughter sparingly.
   Omit stage directions, parenthetical acting notes, asterisks, tildes and emoji.
 - `{spoken}` is read aloud. Always write this field in natural {language}, including when earlier answers used a different language. No Markdown, no bullet symbols, no emoji, no code fences, no Chinese characters, no long URLs.
-- `zh` is the Simplified Chinese subtitle for the same sentence. It must be a faithful translation, not a summary. Keep technical terms in English when that is clearer.
+- Translate only the finished `{spoken}` into conversational Simplified Chinese in `zh`. Keep the same speaker, target, physical state, rhetorical questions, negations, irony and changes of tone. Add no advice of your own. Keep exact technical identifiers.
 - Write the complete spoken reply in the first field, followed by its full Chinese translation. Stay under 90 spoken words.
 - Keep names and clauses intact. Use natural sentence punctuation to vary pace within the reply.
-- `headline_{spoken}` is at most 6 words. `headline_zh` is at most 16 Chinese characters.
+- `headline_{spoken}` is at most 6 words. Translate that exact headline into `headline_zh` in at most 16 Chinese characters. Keep both headlines separate from the full subtitles.
 - For a follow-up question, answer the question directly using the screenshot and the earlier exchange.
 - Do not mention that you are an AI, that you received an image, or these instructions.
 
@@ -63,6 +63,39 @@ class LLMError(Exception):
         super().__init__(message)
         self.en = en
         self.zh = zh
+
+
+def character_messages(persona: str, language: str, rules: str, question: str) -> tuple[list[dict[str, Any]], str]:
+    common_it, en_heading, english = persona.partition("【英语原声对白范例】")
+    common, it_heading, italian = common_it.partition("【意大利语对白范例】")
+    delivery = it_heading + italian if language == "it" else en_heading + english
+    if language == "en":
+        delivery, _, archive = delivery.partition("【点名英文原声时使用】")
+        if re.search(r"原声|原句|原版|原台词|游戏.*台词|作战记录|\b(?:original|in.game|voice ?line|verbatim)\b", question, re.I):
+            delivery += "\n" + archive
+    directions = [common.strip()]
+    examples = []
+    reminder = ""
+    fields = (language, "zh", "headline_" + language, "headline_zh")
+    for line in delivery.splitlines():
+        if line.startswith("回合提醒 "):
+            reminder = line.removeprefix("回合提醒 ").strip()
+            continue
+        if line.startswith("示范 "):
+            try:
+                item = json.loads(line.removeprefix("示范 "))
+            except ValueError:
+                item = None
+            if isinstance(item, dict) and all(isinstance(item.get(k), str) and item[k] for k in ("user", *fields)):
+                answer = {k: item[k] for k in fields}
+                examples.extend(({"role": "user", "content": "虚构对白示范：" + item["user"]},
+                                 {"role": "assistant", "content": json.dumps(answer, ensure_ascii=False)}))
+                continue
+        directions.append(line)
+    if examples:
+        directions.append("标明「虚构对白示范」的回合仅示范口吻和 JSON 格式。人物、物件和事件都属于示例场景。")
+    prompt = "\n".join(directions).strip() + "\n\n" + rules
+    return [{"role": "system", "content": prompt}, *examples], reminder
 
 
 def encode_image(image: Image.Image, max_side: int = 1600, quality: int = 88) -> str:
@@ -89,7 +122,7 @@ def _clean_spoken(text: Any, language: str) -> str:
 def _clean_zh(text: Any) -> str:
     s = str(text or "")
     s = re.sub(r"```.*?```", " ", s, flags=re.S)
-    s = re.sub(r"[*_`#>\[\]{}|]+", " ", s)
+    s = s.replace("`", "").replace("**", "")
     s = re.sub(r"[ \t]+", " ", s)
     s = re.sub(r"\n{2,}", "\n", s).strip()
     return s
@@ -259,12 +292,13 @@ class DeepSeekClient:
             "{language}", "Italian" if self.language == "it" else "English")
         role = character(self.character_id)
         prompt = prompt.replace("pet-Lapland", "pet-" + role.data["name_en"])
-        common_it, en_heading, english = role.data["persona"].partition("【英语原声对白范例】")
-        common, it_heading, italian = common_it.partition("【意大利语对白范例】")
-        delivery = it_heading + italian if self.language == "it" else en_heading + english
-        prompt = "\n\n".join(part.strip() for part in (common, delivery, prompt) if part.strip())
-        messages: list[dict[str, Any]] = [{"role": "system", "content": prompt}]
-        if self.project:
+        messages, reminder = character_messages(role.data["persona"], self.language, prompt, question)
+        project_question = re.search(
+            r"(?:这个|当前|所选|选中|我的|该)(?:的|个)?(?:项目|仓库|工程)|(?:项目|仓库)(?:的)?(?:进度|任务|记录)|"
+            r"DSH\s*(?:里(?:面)?|中)?的?\s*(?:项目|会话)|\b(?:this|current|selected|my) (?:project|repo|repository)\b|"
+            r"\b(?:questo progetto|progetto selezionato|sessione DSH|DSH (?:session|project))\b",
+            question, re.I)
+        if self.project and project_question:
             try:
                 project = project_context(self.project, self.session)
             except ValueError as exc:
@@ -284,6 +318,8 @@ class DeepSeekClient:
             data_url = encode_image(image, self.max_side, self.quality)
             prefix = "Follow-up question about the same screen region" if follow_up else "Look at this selected screen region"
             text = f"{prefix}.\nUser question: {question}\nAnswer the user's question directly. Return only the JSON object."
+            if reminder:
+                text += "\n" + reminder
             messages.append(
                 {
                     "role": "user",
@@ -295,6 +331,8 @@ class DeepSeekClient:
             )
         else:
             text = f"No screenshot is attached. The user asks: {question}\nAnswer in the required JSON shape."
+            if reminder:
+                text += "\n" + reminder
             messages.append({"role": "user", "content": text})
 
         payload: dict[str, Any] = {
@@ -306,7 +344,12 @@ class DeepSeekClient:
             "top_p": 0.9,
             "stream": self.stream and on_first is not None,
         }
-        if self.deepseek and self.effort:
+        if (self.deepseek and image is None and self.effort in ("", "low", "minimal")
+                and self.model in ("deepseek-flash", "deepseek-v4-flash", "deepseek-chat", "deepseek-v4-pro")):
+            payload["thinking"] = {"type": "disabled"}
+            payload["temperature"] = 0.8 if reminder else 1.0
+            del payload["top_p"]
+        elif self.deepseek and self.effort:
             payload["reasoning_effort"] = self.effort
 
         last_error: Exception | None = None

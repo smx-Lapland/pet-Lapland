@@ -142,8 +142,11 @@ class ConnectionsTest(unittest.TestCase):
                     engine = DeepSeekClient(cfg)
                     self.assertTrue(engine.available)
                     self.assertIn(name, engine.list_models())
-                    with patch("pet.llm.project_context", return_value={"项目": "fixture-project"}):
-                        answer = engine.ask(None, "hello")
+                    with patch("pet.llm.project_context", return_value={"项目": "fixture-project"}) as project:
+                        engine.ask(None, "hello")
+                        project.assert_not_called()
+                        self.assertNotIn("fixture-project", str(received[-1][-1]["messages"]))
+                        answer = engine.ask(None, "当前项目的进度呢？")
                     self.assertEqual(answer["segments"][0]["emotion"], "NEUTRAL")
                     path, header, body = received[-1]
                     self.assertEqual((path, header, body["model"]), ("/v1/chat/completions", auth, name))

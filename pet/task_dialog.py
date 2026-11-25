@@ -9,7 +9,7 @@ class TaskDialog(tk.Toplevel):
     def __init__(self, app, project, scope, draft, templates):
         super().__init__(app.root)
         self.app, self.scope = app, scope
-        self.voice = VoiceInput()
+        self.voice = VoiceInput(app.cfg.get("mic_language", "zh"))
         self.dictation = None
         self.title("交给 DSH 执行")
         self.transient(app.root)

@@ -108,8 +108,11 @@ def render_job(job):
         np.random.seed(72)
         voice = reference_voice(job["language"])
         from pet.vits_voice import RATE
-        audio = voice.render(job["text"], job.get("emotion"))
-        write_voice_wav(path, audio, RATE, job["rate"])
+        italian = job["language"] == "it"
+        tempo = 1.08 * 2 ** (max(-10, min(10, job["rate"])) / 10) if italian else 1.
+        audio = voice.render(job["text"], job.get("emotion"), tempo=tempo,
+                             verify=os.environ.get("PET_VERIFY_ITALIAN") != "0")
+        write_voice_wav(path, audio, RATE, 0 if italian else job["rate"])
         return
     rate = f"{max(-90, min(100, int(job['rate']) * 10)):+d}%"
     args = (job["text"], job["voice"], rate)
@@ -127,24 +130,31 @@ def render_job(job):
 
 
 def reduce_decoder_tones(audio, sample_rate):
-    """Attenuate persistent narrow decoder peaks measured in the 24 kHz bundles."""
+    """Attenuate only stationary decoder peaks above their local neighbourhood."""
     import numpy as np
 
-    if sample_rate != 24000 or audio.size < 3840:
+    if sample_rate == 22050:
+        # The Italian VITS decoder leaves narrow lines at multiples of its upsampling clock.
+        frame, step, side, bins = 2048, 220, 8, (384, 448, 512)
+    elif sample_rate == 24000:
+        frame, step, side, bins = 960, 240, 3, (240, 288)
+    else:
         return audio
-    frames = np.lib.stride_tricks.sliding_window_view(audio, 960)[::240]
+    if audio.size < max(frame * 2, 3840):
+        return audio
+    frames = np.lib.stride_tricks.sliding_window_view(audio, frame)[::step]
     power = np.mean(frames ** 2, axis=1)
     active = frames[power > max(1e-5, np.percentile(power, 90) * 0.012)]
     if len(active) < 12:
         return audio
-    spectra = np.abs(np.fft.rfft(active * np.hanning(960))) + 1e-12
+    spectra = np.abs(np.fft.rfft(active * np.hanning(frame))) + 1e-12
     # Compare each peak to its immediate neighbourhood across active speech.
     taps = np.arange(-480, 481)
     window = np.exp(-0.5 * (taps / 150) ** 2)
     kernel = np.zeros(len(taps))
-    for frequency in (6000, 7200):
-        i = frequency // 25
-        ratio = spectra[:, i] / np.sqrt(spectra[:, i - 3] * spectra[:, i + 3])
+    for i in bins:
+        frequency = i * sample_rate / frame
+        ratio = spectra[:, i] / np.sqrt(spectra[:, i - side] * spectra[:, i + side])
         excess_db = 20 * np.log10(np.median(ratio))
         if excess_db > 3:
             gain = 10 ** (-min(5, excess_db - 2) / 20)
@@ -452,7 +462,7 @@ def lapland_audio(path: Path, text: str, language: str, rate: int, emotion=None)
     if play_original_line(path, text, language, rate):
         return
     audio, sample_rate = synthesize_pocket(text, language, emotion)
-    write_voice_wav(path, audio, sample_rate, rate)
+    write_voice_wav(path, audio, sample_rate, rate, italian_dialogue=language == "it")
 
 
 @lru_cache(maxsize=1)
@@ -519,10 +529,18 @@ def synthesize_pocket(text, language, emotion, pause_seconds=None):
     return reduce_decoder_tones(audio, model.sample_rate), model.sample_rate
 
 
-def write_voice_wav(path, audio, sample_rate, rate):
+def write_voice_wav(path, audio, sample_rate, rate, *, italian_dialogue=False):
     import numpy as np
 
-    if rate:
+    if italian_dialogue and audio.size >= sample_rate // 10:
+        import parselmouth
+        from parselmouth.praat import call
+
+        # Change duration once, after the final take, preserving the actor's pitch contour.
+        speed = 1.08 * 2 ** (max(-10, min(10, rate)) / 10)
+        sound = parselmouth.Sound(audio, sample_rate)
+        audio = call(sound, "Lengthen (overlap-add)", 80, 620, 1 / speed).values[0]
+    elif rate:
         from audiotsm import wsola
         from audiotsm.io.array import ArrayReader, ArrayWriter
 
@@ -544,7 +562,7 @@ def main():
     try:
         if provider == "vits":
             voice = reference_voice(language)
-            if language == "it":
+            if language == "it" and os.environ.get("PET_VERIFY_ITALIAN") != "0":
                 from pet.voice_input import FILES, MODEL_DIR, load_recognizer
                 if all((MODEL_DIR / f).is_file() for f in FILES):
                     voice.recognizer = load_recognizer("it")
