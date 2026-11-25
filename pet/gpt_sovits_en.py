@@ -77,9 +77,10 @@ class EnglishVoice:
         from AR.models.t2s_model import Text2SemanticDecoder
         from module.models import SynthesizerTrn
         from text import english
+        from pet.voice_device import cpu_voice_threads
 
-        torch.set_num_threads(2)
         self.device = "cuda" if device == "cuda" and torch.cuda.is_available() else "cpu"
+        torch.set_num_threads(cpu_voice_threads(4) if self.device == "cpu" else 2)
         cfg = json.loads((modules / "configs/s2.json").read_text("utf8"))
         self.vocoder = SynthesizerTrn(cfg["data"]["filter_length"] // 2 + 1,
                                       cfg["train"]["segment_size"] // cfg["data"]["hop_length"],
@@ -103,6 +104,7 @@ class EnglishVoice:
     def activate(self, device):
         import torch
         if device == "cuda" and self.device == "cpu" and torch.cuda.is_available():
+            torch.set_num_threads(2)
             self.gpt.to("cuda")
             self.vocoder.to("cuda")
             self.refs = {name: tuple(t.to("cuda") for t in ref) for name, ref in self.refs.items()}

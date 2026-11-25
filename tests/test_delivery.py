@@ -138,7 +138,8 @@ class VoiceTest(unittest.TestCase):
     def test_reference_italian_route_and_cpu_recovery(self):
         from pet.speech import SpeechEngine
 
-        with patch("pet.speech.italian_reference.installed_python", return_value=Path(sys.executable)):
+        with patch("pet.speech.cuda_driver_present", return_value=True), \
+             patch("pet.speech.italian_reference.installed_python", return_value=Path(sys.executable)):
             cfg = {"speech_provider": "vits", "speech_language": "it", "italian_reference_voice": True}
             engine = SpeechEngine(cfg, Path("unused"))
             self.assertEqual(Path(engine._neural_command()[1]).name, "italian_reference.py")
@@ -251,7 +252,8 @@ class VoiceTest(unittest.TestCase):
             return True
 
         with tempfile.TemporaryDirectory() as tmp, patch("pet.speech.CACHE_DIR", Path(tmp)), \
-             patch("pet.speech.cuda_installed", return_value=True), patch("pet.speech.run_worker", side_effect=render):
+             patch("pet.speech.cuda_driver_present", return_value=True), patch("pet.speech.cuda_installed", return_value=True), \
+             patch("pet.speech.run_worker", side_effect=render):
             engine = SpeechEngine({"speech_provider": "vits", "speech_language": "it"}, Path("unused"))
             path, used = engine.prepare_segment("Ciao.", threading.Event(), "vits", "MOCKING")
             self.assertEqual((used, engine.device), ("vits", "cpu"))
@@ -260,7 +262,7 @@ class VoiceTest(unittest.TestCase):
 
     def test_auto_gpu_recovery_reuses_cpu_until_cooldown_expires(self):
         from pet.speech import SpeechEngine
-        with patch("pet.speech.cuda_installed", return_value=True):
+        with patch("pet.speech.cuda_driver_present", return_value=True), patch("pet.speech.cuda_installed", return_value=True):
             engine = SpeechEngine({"speech_provider": "vits", "speech_language": "it"}, Path("unused"))
         with patch("pet.speech.time.monotonic", return_value=10):
             engine._use_cpu_fallback()
@@ -281,6 +283,21 @@ class VoiceTest(unittest.TestCase):
             with patch("pet.speech.cuda_installed", return_value=installed), patch("pet.speech.installed_voice", return_value=(None, None)):
                 engine = SpeechEngine({"voice_device": mode, "speech_provider": "vits"}, Path("unused"))
                 self.assertEqual(engine._neural_env()["PET_TTS_DEVICE"], "cpu")
+
+    def test_auto_on_integrated_only_machine_skips_cuda_workers(self):
+        from pet.speech import SpeechEngine
+
+        with patch("pet.speech.cuda_driver_present", return_value=False), \
+             patch("pet.speech.cuda_installed", return_value=True), \
+             patch("pet.speech.installed_voice", return_value=(Path("english-weights"), Path(sys.executable))), \
+             patch("pet.speech.italian_reference.installed_python") as italian_runtime:
+            for lang, script in (("en", "gpt_sovits_en.py"), ("it", "neural_worker.py")):
+                engine = SpeechEngine({"speech_provider": "vits", "speech_language": lang,
+                                       "italian_reference_voice": True}, Path("unused"))
+                self.assertEqual(Path(engine._neural_command()[1]).name, script)
+                self.assertEqual(engine._neural_env()["PET_TTS_DEVICE"], "cpu")
+                self.assertIsNone(engine.gpu_retry_at)
+            italian_runtime.assert_not_called()
 
     def test_prepared_worker_stops_mid_segment_and_removes_pending_file(self):
         from pet.speech import SpeechEngine
@@ -893,6 +910,24 @@ class DesktopTest(unittest.TestCase):
             self.assertEqual(warm.call_args.kwargs, {})
             app._hide_window()
             self.assertIsNone(app.renderer_timer)
+            close.assert_called_once()
+
+    def test_cpu_voice_survives_automatic_fold_until_standby_expires(self):
+        app = self.app
+        app.speech.provider, app.speech.device, app.speech.muted = "vits", "cpu", False
+        app.speech.english_bundle = Path("fixture.safetensors")
+        with patch.object(app.speech, "warmup") as warm, patch.object(app.speech, "close_renderer") as close:
+            app._open_panel()
+            app._cancel_renderer_timer()
+            app._release_idle_renderer()
+            app._close_panel(automatic=True)
+            app._preload_compact_voice()
+            close.assert_not_called()
+            warm.assert_called_with(standby=True)
+            self.assertIsNone(app.renderer_timer)
+            self.assertIsNotNone(app.standby_timer)
+            app._clear_standby_timer()
+            app._expire_standby()
             close.assert_called_once()
 
     def test_lapland_poses_follow_a_request(self):

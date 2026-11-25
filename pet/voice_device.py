@@ -25,6 +25,22 @@ def cuda_installed():
     return (CUDA_RUNTIME / "onnxruntime/capi/onnxruntime_providers_cuda.dll").is_file()
 
 
+def cuda_driver_present():
+    if os.environ.get("CUDA_VISIBLE_DEVICES", "0").strip() in ("", "-1"):
+        return False
+    # Check the Windows driver independently of the optional ONNX/PyTorch packages.
+    # Loading torch or initializing CUDA here would also block the desktop UI.
+    if sys.platform == "darwin":
+        return False
+    return (sys.platform != "win32" or
+            (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/nvcuda.dll").is_file())
+
+
+def cpu_voice_threads(limit):
+    # Leave room for the UI, microphone and other applications on smaller machines.
+    return max(1, min(limit, (os.cpu_count() or 2) // 2))
+
+
 @lru_cache(maxsize=1)
 def execution_providers():
     if os.environ.get("PET_TTS_DEVICE") != "cuda" or not cuda_installed():

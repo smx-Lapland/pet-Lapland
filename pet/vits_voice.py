@@ -10,7 +10,7 @@ import parselmouth
 import miniaudio
 from parselmouth.praat import call
 from .voice_input import FILES, MODEL_DIR, load_recognizer, recognize_audio
-from .voice_device import execution_providers
+from .voice_device import cpu_voice_threads, execution_providers
 
 ROOT = Path(__file__).resolve().parents[1]
 RATE = 22050
@@ -111,6 +111,9 @@ class ReferenceVoice:
         model = MODELS / f"lapland-{language}.onnx"
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 2
+        if providers == ["CPUExecutionProvider"]:
+            opts.intra_op_num_threads = cpu_voice_threads(6)
+            opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         opts.inter_op_num_threads = 1
         def session(path):
             return ort.InferenceSession(str(path), sess_options=opts, providers=providers)

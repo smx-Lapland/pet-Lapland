@@ -144,6 +144,8 @@ Remove-Item Env:PET_MODEL_KEY
 .\.venv\Scripts\python.exe tools\setup_italian_reference.py
 ```
 
+**只有 Intel 或 AMD 核显的 Windows 电脑。** 保持「本地神经语音运算」为「GPU 优先（自动回退 CPU）」。缺少 NVIDIA 驱动时，桌宠直接用 CPU 合成。英配人物包可用 `py -3.10 tools/setup_gpt_sovits_en.py --cpu` 安装运行库。已安装意配 Piper 模型的电脑可选快速意配。桌宠显示时会预载这些模型，对话框自动收起后在内存中保留最多两分钟，再打开可接着用。手动隐藏桌宠会立即释放语音进程。
+
 **为 Windows x64 源码版启用 CUDA。** 已验证的组合是 64 位 Python 3.12、可用的 NVIDIA 驱动和 CUDA Toolkit 12.8。在项目根目录运行下列命令，将 GPU 版 ONNX Runtime 和 cuDNN 装进语音专用目录。使用 CPU 的电脑只需第 1 节的普通安装。分享版默认携带 CPU 运行库。
 
 ```powershell

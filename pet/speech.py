@@ -16,7 +16,7 @@ from typing import Any
 from .config import CACHE_DIR
 from .gpt_sovits_en import RUNTIME, installed_voice
 from . import italian_reference
-from .voice_device import cuda_installed
+from .voice_device import cuda_driver_present, cuda_installed
 
 log = logging.getLogger("mochi.speech")
 
@@ -37,13 +37,14 @@ class SpeechEngine:
         self.english_bundle = None
         self.english_python = None
         self.italian_python = None
+        try_cuda = (cfg.get("voice_device", "auto") == "auto"
+                    and self.provider in ("lapland", "vits", "piper") and cuda_driver_present())
         if self.provider == "vits" and self.language == "en":
             self.english_bundle, self.english_python = installed_voice(self.character_id)
         if (self.provider == "vits" and self.language == "it" and cfg.get("italian_reference_voice")
-                and not cfg.get("verify_italian_voice") and cfg.get("voice_device", "auto") == "auto"):
+                and not cfg.get("verify_italian_voice") and try_cuda):
             self.italian_python = italian_reference.installed_python()
-        self.device = ("cuda" if cfg.get("voice_device", "auto") == "auto"
-                       and self.provider in ("lapland", "vits", "piper")
+        self.device = ("cuda" if try_cuda
                        and (self.english_bundle or self.italian_python or cuda_installed()) else "cpu")
         self.gpu_retry_at = None
         self.neural_voice = (cfg.get("neural_voice_it", "it-IT-ElsaNeural") if self.language == "it"
@@ -58,6 +59,14 @@ class SpeechEngine:
         self._renderer_lock = threading.Lock()
         self._renderer = None
         self._standby = False
+
+    @property
+    def supports_standby(self):
+        if self.english_bundle:
+            return True
+        if self.provider != "vits" or self.device != "cpu" or self.gpu_retry_at is not None:
+            return False
+        return (RUNTIME.parent / "piper-vits-reference" / f"lapland-{self.language}.onnx").is_file()
 
     def _neural_command(self):
         # Launch the interpreter directly so cancellation also stops native inference.

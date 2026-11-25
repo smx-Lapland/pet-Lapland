@@ -355,7 +355,7 @@ class MochiApp:
         self._preload_compact_voice()
 
     def _preload_compact_voice(self):
-        if self.hidden or self.closing or self.panel_open or self.speech.muted or not self.speech.english_bundle:
+        if self.hidden or self.closing or self.panel_open or self.speech.muted or not self.speech.supports_standby:
             return
         if self.standby_timer is None:
             self.speech.warmup(standby=True)
@@ -399,9 +399,11 @@ class MochiApp:
             self._update_capture_choice()
             self._warm_voice_for_input()
 
-    def _close_panel(self):
+    def _close_panel(self, *, automatic=False):
         self._cancel_voice_input()
-        self.stop_speech()
+        keep_cpu = automatic and self.speech.device == "cpu" and self.speech.supports_standby
+        self.stop_speech(keep_idle=keep_cpu)
+        self._cancel_renderer_timer()
         self._set_input_visible(False)
         if self.root.focus_get() in (self.entry, self.talk_button, self.conversation_button):
             self.root.focus_set()
@@ -436,7 +438,7 @@ class MochiApp:
             if reading or busy or self.capturing or self.dialog:
                 self.panel_active_at = now
             elif now - self.panel_active_at >= self.PANEL_IDLE_SECONDS:
-                self._close_panel()
+                self._close_panel(automatic=True)
                 self._preload_compact_voice()
         self.root.after(1000, self._check_panel)
 
@@ -1586,7 +1588,8 @@ class MochiApp:
 
     def _release_idle_renderer(self):
         self.renderer_timer = None
-        if self.panel_open and not self.hidden and (self.conversation or self.input_visible or self.voice_turn):
+        if self.panel_open and not self.hidden and (self.conversation or self.input_visible or self.voice_turn
+                                                   or (self.speech.device == "cpu" and self.speech.supports_standby)):
             self.renderer_timer = self.root.after(30000, self._release_idle_renderer)
         else:
             self.speech.close_renderer()
