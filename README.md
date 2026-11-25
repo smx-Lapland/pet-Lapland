@@ -16,7 +16,7 @@ pet-Lapland 可以看你框选的屏幕、陪你练口语，也可以在你选�
 git clone --branch codex/macos-support https://github.com/smx-Lapland/pet-Lapland.git
 cd pet-Lapland
 python3.12 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install --prefer-binary -r requirements.txt
 sh run_pet.command
 ```
 

@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
       - run: |
           python -m venv .venv
-          .venv/bin/python -m pip install -r requirements.txt
+          .venv/bin/python -m pip install --prefer-binary -r requirements.txt
       - run: |
           test -x run_pet.command
           sh -n run_pet.command
