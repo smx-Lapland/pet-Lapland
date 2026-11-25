@@ -109,7 +109,7 @@ def render_job(job):
         voice = reference_voice(job["language"])
         from pet.vits_voice import RATE
         italian = job["language"] == "it"
-        tempo = 1.08 * 2 ** (max(-10, min(10, job["rate"])) / 10) if italian else 1.
+        tempo = 2 ** (max(-10, min(10, job["rate"])) / 10) if italian else 1.
         audio = voice.render(job["text"], job.get("emotion"), tempo=tempo,
                              verify=os.environ.get("PET_VERIFY_ITALIAN") != "0")
         write_voice_wav(path, audio, RATE, 0 if italian else job["rate"])
@@ -532,12 +532,12 @@ def synthesize_pocket(text, language, emotion, pause_seconds=None):
 def write_voice_wav(path, audio, sample_rate, rate, *, italian_dialogue=False):
     import numpy as np
 
-    if italian_dialogue and audio.size >= sample_rate // 10:
+    if italian_dialogue and rate and audio.size >= sample_rate // 10:
         import parselmouth
         from parselmouth.praat import call
 
         # Change duration once, after the final take, preserving the actor's pitch contour.
-        speed = 1.08 * 2 ** (max(-10, min(10, rate)) / 10)
+        speed = 2 ** (max(-10, min(10, rate)) / 10)
         sound = parselmouth.Sound(audio, sample_rate)
         audio = call(sound, "Lengthen (overlap-add)", 80, 620, 1 / speed).values[0]
     elif rate:

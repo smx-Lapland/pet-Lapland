@@ -15,7 +15,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pet.config import APP_DIR, CACHE_DIR, DEFAULTS, apply_credentials
+from pet.config import APP_DIR, CACHE_DIR, DEFAULTS, apply_credentials, load_config
 from pet.llm import DeepSeekClient
 
 
@@ -45,8 +45,11 @@ def render_review(folder):
     CACHE_DIR.mkdir(exist_ok=True)
     audio = folder / "audio"
     audio.mkdir(exist_ok=True)
+    settings = load_config()
+    voice_settings = {k: settings[k] for k in ("voice_device", "rate", "verify_italian_voice",
+                                               "italian_reference_voice")}
     for lang in ("en", "it"):
-        engine = SpeechEngine({**DEFAULTS, "speech_provider": "vits", "speech_language": lang},
+        engine = SpeechEngine({**DEFAULTS, **voice_settings, "speech_provider": "vits", "speech_language": lang},
                               APP_DIR / "pet/tts_worker.ps1")
         stop = threading.Event()
         try:
@@ -57,8 +60,6 @@ def render_review(folder):
                 if not re.fullmatch(r"\d{2}-(en|it)-\d+", row["编号"]):
                     raise ValueError("Invalid blind sample ID")
                 target = audio / (row["编号"] + ".wav")
-                if target.is_file():
-                    continue
                 path, provider = engine.prepare_segment(row["台词"], stop, "vits", row["标签"])
                 if provider != "vits" or not path:
                     if path:

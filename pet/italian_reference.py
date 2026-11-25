@@ -138,11 +138,34 @@ def shape_syllable_stress(audio, sample_rate):
     return shaped * min(match, .98 / np.max(np.abs(shaped)))
 
 
+def shorten_internal_silence(audio, sample_rate):
+    """Shorten long, near-silent gaps while retaining both sides of each breath."""
+    import numpy as np
+
+    step = max(1, sample_rate // 100)
+    frames = len(audio) // step
+    if frames < 80:
+        return audio
+    peaks = np.max(np.abs(audio[:frames * step].reshape(frames, step)), axis=1)
+    active = np.flatnonzero(peaks > .002)
+    pieces = []
+    cursor = 0
+    for i in np.flatnonzero(np.diff(active) > 80):
+        # Keep 270 ms of room at each end. Crossfade only inside the quiet block.
+        left = (active[i] + 28) * step
+        right = (active[i + 1] - 27) * step
+        mix = np.linspace(0, 1, step, dtype=audio.dtype)
+        pieces.extend((audio[cursor:left], audio[left:left+step] * (1-mix) + audio[right:right+step] * mix))
+        cursor = right + step
+    return np.concatenate([*pieces, audio[cursor:]]) if pieces else audio
+
+
 def write_dialogue(path, audio, sample_rate, rate):
     import soundfile as sf
     from pet.neural_worker import trim_phrase_join
 
-    audio = shape_syllable_stress(trim_phrase_join(audio, sample_rate, True, True), sample_rate)
+    audio = trim_phrase_join(audio, sample_rate, True, True)
+    audio = shape_syllable_stress(shorten_internal_silence(audio, sample_rate), sample_rate)
     if rate:
         from audiotsm import wsola
         from audiotsm.io.array import ArrayReader, ArrayWriter

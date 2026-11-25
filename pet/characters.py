@@ -29,6 +29,7 @@ VOICE_LIMITS = {"voice.onnx": MAX_MODEL, "voice.onnx.json": 256000, BUNDLE: 288 
 
 # Exact stock text shipped in previous Lapland packs, including the local bilingual edition.
 _STOCK_LAPLAND_PERSONAS = {
+    "adca3cdcdbd3e60f60f8d46312ad5a36a9ba5e15f35ada070aac290c2a50134c",
     "1acad74acd52faac007e60e33d06d1e49a001135e14601577da1e757fe4f9810",
     "07f38add08b78351abafe44650b71abc492f4ad56337c50b0bc89c77030f674e",
     "900ef52eec9d788747e72e9c161de7cbc5bd59266bdf95ab5df5f1489b36122d",

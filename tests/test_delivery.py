@@ -192,12 +192,15 @@ class VoiceTest(unittest.TestCase):
         samples = .2 * np.sin(2 * np.pi * 180 * np.arange(2 * rate) / rate)
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "line.wav"
-            for italian, tempo in ((False, 1.), (True, 1.08)):
-                write_voice_wav(path, samples, rate, 0, italian_dialogue=italian)
+            for italian, setting in ((False, 0), (True, 0), (True, 2)):
+                tempo = 2 ** (setting / 10)
+                write_voice_wav(path, samples, rate, setting, italian_dialogue=italian)
                 with wave.open(str(path)) as wav:
                     signal = np.frombuffer(wav.readframes(wav.getnframes()), "<i2")
                     self.assertEqual(wav.getframerate(), rate)
                 self.assertAlmostEqual(len(signal) / rate, 2 / tempo, delta=.02)
+                if setting == 0:
+                    np.testing.assert_array_equal(signal, (samples * 32767).astype("<i2"))
                 middle = signal[rate // 4:rate * 5 // 4]
                 self.assertAlmostEqual(np.abs(np.fft.rfft(middle)).argmax(), 180, delta=2)
 
@@ -218,6 +221,19 @@ class VoiceTest(unittest.TestCase):
                 generate.assert_called_once_with("Giochiamo?", "MOCKING", tempo=1.)
                 self.assertEqual(check.call_count, int(verify))
                 self.assertEqual(audio, "checked" if verify else "primary")
+
+    def test_fast_italian_sets_tempo_in_piper_without_repitching(self):
+        from unittest.mock import Mock
+        from pet.vits_voice import ReferenceVoice, RATE
+        import numpy as np
+        voice = Mock(language="it", targets={"NEUTRAL": None})
+        voice.reference.return_value = ([200] * 12, .2)
+        word = np.full(RATE // 4, .4, np.float32)
+        voice.convert.return_value = word
+        voice.piper.synthesize.return_value = [Mock(phonemes=".", audio_float_array=word)]
+        with patch("pet.vits_voice.follow_contour", side_effect=AssertionError("resynthesis")):
+            ReferenceVoice.generate(voice, "Ancora.", tempo=1.2)
+        self.assertAlmostEqual(voice.piper.synthesize.call_args.args[1].length_scale, 1 / 1.2)
 
     def test_failed_gpu_retries_same_voice_on_cpu(self):
         import wave

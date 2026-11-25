@@ -123,7 +123,8 @@ class ReferenceVoice:
     def reference(self, emotion):
         with wave.open(str(REFERENCES / self.language / (emotion + ".wav"))) as wav:
             reference = np.frombuffer(wav.readframes(wav.getnframes()), "<i2").astype(np.float32) / 32768
-        return pitch_track(reference)[1], reference_pause(reference)
+        pitch = pitch_track(reference)[1] if self.language == "en" else ()
+        return pitch, reference_pause(reference)
 
     def convert(self, audio, emotion):
         converted = self.converter.run(None, {"source": spectrum(audio), "target": self.targets[emotion]})[0][0, 0]
@@ -147,6 +148,9 @@ class ReferenceVoice:
             text = re.sub(r"(?<=\w),[ \t]+(Doctor)(?=[ \t]*(?:[?!.…]|$))", r" \1", text, flags=re.I)
             # Match the brisk English takes while timing the pause after a question separately.
             duration *= .67
+        else:
+            # Let Piper generate the requested timing in its own phonemes.
+            duration /= tempo
         cfg = SynthesisConfig(length_scale=duration * 2 ** (-max(-10, min(10, rate)) / 10))
         parts = []
         next_pause = pause
@@ -155,7 +159,9 @@ class ReferenceVoice:
             if len(audio) < 512:
                 continue
             converted = self.convert(audio, emotion)
-            phrase = follow_contour(converted, reference_pitch if contour else (), tempo)
+            phrase = converted
+            if english:
+                phrase = follow_contour(phrase, reference_pitch if contour else (), tempo)
             if stress_db:
                 phrase = emphasize_syllables(phrase, RATE, stress_db)
             if english:
@@ -217,10 +223,10 @@ class ReferenceVoice:
 
         if not (ROOT / "models/pocket-tts/onnx/italian/bundle.json").is_file():
             return primary
-        pitch, pause = self.reference(emotion)
+        _, pause = self.reference(emotion)
         spoken, rate = synthesize_pocket(text, "it", emotion, pause)
         native = resample(spoken, rate, RATE)
-        directed = follow_contour(self.convert(native, emotion), pitch, tempo)
+        directed = follow_contour(self.convert(native, emotion), (), tempo)
         candidate_errors = errors(directed)
         # Small transcription differences are common even on the original recordings.
         # Keep the Piper performance unless the converted retry recovers multiple words.

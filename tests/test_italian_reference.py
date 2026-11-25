@@ -6,13 +6,26 @@ from unittest.mock import patch
 
 import numpy as np
 
-from pet.italian_reference import shape_syllable_stress, write_dialogue
+from pet.italian_reference import shape_syllable_stress, shorten_internal_silence, write_dialogue
 from pet.neural_worker import trim_phrase_join
 
 
 @unittest.skipUnless(importlib.util.find_spec("scipy") and importlib.util.find_spec("soundfile"),
                      "requires the optional Italian reference voice environment")
 class ItalianDeliveryTest(unittest.TestCase):
+    def test_only_trims_long_internal_silence(self):
+        rate = 24000
+        voice = np.full(rate // 3, .12, np.float32)
+        pause = np.zeros(rate, np.float32)
+        sample = np.concatenate([pause, voice, pause, voice, pause])
+        edited = shorten_internal_silence(sample, rate)
+        self.assertAlmostEqual((len(sample) - len(edited)) / rate, .46, delta=.02)
+        np.testing.assert_array_equal(edited[:len(pause)+len(voice)], sample[:len(pause)+len(voice)])
+        np.testing.assert_array_equal(edited[-len(pause)-len(voice):], sample[-len(pause)-len(voice):])
+        for gap in (pause[:rate//2], pause + .004):
+            natural = np.concatenate([voice, gap, voice])
+            self.assertIs(shorten_internal_silence(natural, rate), natural)
+
     def test_preserves_timing_and_accents_only_flat_phrases(self):
         import soundfile as sf
 
