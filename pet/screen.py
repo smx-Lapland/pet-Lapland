@@ -2,6 +2,7 @@
 
 import ctypes
 import logging
+import sys
 import time
 import tkinter as tk
 from ctypes import wintypes
@@ -17,6 +18,8 @@ ACCENT = "#6EE7C7"
 
 
 def set_dpi_awareness() -> None:
+    if sys.platform != "win32":
+        return
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor aware
     except Exception:
@@ -26,7 +29,25 @@ def set_dpi_awareness() -> None:
             pass
 
 
+def _mac_displays():
+    from AppKit import NSScreen
+
+    screens = NSScreen.screens()
+    primary_height = screens[0].frame().size.height
+
+    def tk_bounds(rect):
+        x, y = rect.origin
+        w, h = rect.size
+        return round(x), round(primary_height - y - h), round(x + w), round(primary_height - y)
+
+    return [(tk_bounds(s.frame()), tk_bounds(s.visibleFrame())) for s in screens]
+
+
 def virtual_screen() -> tuple[int, int, int, int]:
+    if sys.platform == "darwin":
+        bounds = [frame for frame, _ in _mac_displays()]
+        left, top, right, bottom = zip(*bounds)
+        return min(left), min(top), max(right) - min(left), max(bottom) - min(top)
     user32 = ctypes.windll.user32
     x = int(user32.GetSystemMetrics(76))  # SM_XVIRTUALSCREEN
     y = int(user32.GetSystemMetrics(77))  # SM_YVIRTUALSCREEN
@@ -38,6 +59,12 @@ def virtual_screen() -> tuple[int, int, int, int]:
 
 
 def work_area(x=None, y=None) -> tuple[int, int, int, int]:
+    if sys.platform == "darwin":
+        displays = _mac_displays()
+        for (left, top, right, bottom), visible in displays:
+            if x is not None and y is not None and left <= x < right and top <= y < bottom:
+                return visible
+        return displays[0][1]
     rect = wintypes.RECT()
     if x is not None and y is not None:
         class MonitorInfo(ctypes.Structure):
@@ -67,6 +94,9 @@ def capture_region(bbox: tuple[int, int, int, int]) -> Image.Image:
     top = max(vy, min(top, vy + vh))
     right = max(left + 1, min(right, vx + vw))
     bottom = max(top + 1, min(bottom, vy + vh))
+    if sys.platform == "darwin":
+        # Pillow passes these logical screen coordinates to screencapture -R.
+        return ImageGrab.grab(bbox=(left, top, right, bottom)).convert("RGB")
     full = ImageGrab.grab(bbox=None, include_layered_windows=True, all_screens=True)
     crop = full.crop((left - vx, top - vy, right - vx, bottom - vy))
     if crop.width < 2 or crop.height < 2:

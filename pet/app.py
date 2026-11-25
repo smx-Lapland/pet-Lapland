@@ -6,6 +6,7 @@ import math
 import queue
 import re
 import sqlite3
+import sys
 import threading
 import time
 import tkinter as tk
@@ -41,7 +42,7 @@ from .voice_input import MIC_THRESHOLDS, SpeechGate, VoiceInput, VoiceInputError
 
 log = logging.getLogger("mochi.app")
 
-TRANSPARENT = "#010203"
+TRANSPARENT = "systemTransparent" if sys.platform == "darwin" else "#010203"
 BUBBLE = "#25222B"
 BUBBLE_BORDER = "#665B67"
 BUBBLE_SHADOW = "#18151D"
@@ -156,17 +157,20 @@ class MochiApp:
         self.root.resizable(False, False)
         self.root.configure(bg=TRANSPARENT)
         try:
-            self.root.attributes("-transparentcolor", TRANSPARENT)
+            if sys.platform == "darwin":
+                self.root.attributes("-transparent", True)
+            else:
+                self.root.attributes("-transparentcolor", TRANSPARENT)
         except Exception:
             log.warning("transparentcolor unavailable")
         try:
             self.root.attributes("-topmost", True)
         except Exception:
             pass
-        try:
+        if sys.platform == "darwin":
+            self.root.createcommand("::tk::mac::ReopenApplication", self._restore_window)
+        else:
             self.root.attributes("-toolwindow", True)
-        except Exception:
-            pass
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
         self.root.bind("<Escape>", self._on_escape)
 
@@ -524,7 +528,6 @@ class MochiApp:
                                           (WHITE, CREAM))
         self.captions.set_backdrop(skin, self.CONTENT_X - 168, self.CAPTION_Y - 8)
         self.caption_window = c.create_window(self.CONTENT_X, self.CAPTION_Y, anchor="nw", window=self.captions)
-        self.captions.bind("<Button-3>", self._popup_menu)
         self.divider = c.create_line(self.CONTENT_X, 153, self.CONTENT_X + self.subtitle_width, 153, fill="#645863")
         self.project_button = tk.Menubutton(c, bg=CONTROL, fg=CREAM, activebackground=TEAL,
                                           relief="flat", indicatoron=True, anchor="w",
@@ -546,7 +549,7 @@ class MochiApp:
         )
         for reverse in (False, True):
             grip = tk.Canvas(c, width=18, height=18, highlightthickness=0, bd=0,
-                             cursor="size_nw_se", bg=BUBBLE)
+                             cursor="crosshair" if sys.platform == "darwin" else "size_nw_se", bg=BUBBLE)
             for length in (5, 10, 15):
                 points = (2, length, length, 2) if reverse else (17-length, 16, 16, 17-length)
                 grip.create_line(*points, fill=MUTED)
@@ -613,7 +616,8 @@ class MochiApp:
                 sprite.thumbnail((164, 130), Image.Resampling.LANCZOS)
                 # The Windows overlay uses a binary colour key. Low-opacity
                 # pixels would otherwise show up as dark specks on light desktops.
-                sprite.putalpha(sprite.getchannel("A").point(lambda a: 255 if a >= 96 else 0))
+                if sys.platform == "win32":
+                    sprite.putalpha(sprite.getchannel("A").point(lambda a: 255 if a >= 96 else 0))
                 self.poses[pose] = ImageTk.PhotoImage(sprite, master=self.root)
         self.root.iconphoto(True, self.poses["wait"])
 
@@ -625,7 +629,6 @@ class MochiApp:
         c.tag_bind("pet", "<ButtonPress-1>", self._pet_press)
         c.tag_bind("pet", "<B1-Motion>", self._pet_drag)
         c.tag_bind("pet", "<ButtonRelease-1>", self._pet_release)
-        c.tag_bind("pet", "<Button-3>", self._popup_menu)
         c.tag_bind("pet", "<Enter>", lambda _e: c.configure(cursor="hand2"))
         c.tag_bind("pet", "<Leave>", lambda _e: c.configure(cursor=""))
 
@@ -667,6 +670,8 @@ class MochiApp:
         # Replace in one pass so swapping two bindings also swaps their labels.
         labels = {spec: self.cfg["hotkeys"][action].title()
                   for action, spec in DEFAULTS["hotkeys"].items()}
+        if sys.platform == "darwin":
+            labels = {spec: label.replace("Alt", "Option").replace("Win", "Cmd") for spec, label in labels.items()}
         return re.sub(r"Ctrl\+Alt\+(?:Space|S|H|Q)\b", lambda match: labels[match[0].lower()], text)
 
     def _close_dialog(self):
@@ -842,7 +847,6 @@ class MochiApp:
         self.speech = SpeechEngine(cfg, Path(__file__).with_name("tts_worker.ps1"))
         if changed_keys:
             self.hotkeys.stop()
-            self.hotkeys.join(timeout=1)
             self.hotkeys = HotkeyManager(values["hotkeys"], self.events)
             self.hotkeys.start()
         self.menu.destroy()
@@ -897,7 +901,10 @@ class MochiApp:
         return "Unmute voice" if self.speech.muted else "Mute voice"
 
     def _bind_events(self) -> None:
-        self.canvas.bind("<Button-3>", self._popup_menu)
+        clicks = ("<Button-2>", "<Button-3>", "<Control-Button-1>") if sys.platform == "darwin" else ("<Button-3>",)
+        for widget in (self.canvas, self.captions, *self.captions.tracks):
+            for click in clicks:
+                widget.bind(click, self._popup_menu)
         self.root.bind("<Control-Return>", lambda _e: self.submit_input())
 
     # ---------- state / text ----------
@@ -1308,7 +1315,9 @@ class MochiApp:
             self.capturing = False
             self._restore_window()
             self._open_panel()
-            self._show_error("I couldn't capture that region.", "我没能截取这个区域。")
+            hint = ("请在系统设置的「隐私与安全性」中允许屏幕录制，重新打开桌宠后再试。"
+                    if sys.platform == "darwin" else "我没能截取这个区域。")
+            self._show_error("I couldn't capture that region.", hint)
             return
         if image.width < 16 or image.height < 16:
             self.capturing = False
@@ -1787,7 +1796,6 @@ class MochiApp:
         self.stop_speech()
         try:
             self.hotkeys.stop()
-            self.hotkeys.join(timeout=1)
         except Exception:
             pass
         try:

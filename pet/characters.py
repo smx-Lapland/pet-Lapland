@@ -2,7 +2,6 @@
 import io
 import hashlib
 import json
-import os
 import re
 import shutil
 import tempfile
@@ -13,7 +12,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from .config import APP_DIR, DEFAULTS, validate_connection
+from .config import APP_DIR, DEFAULTS, user_data_dir, validate_connection
 from .gpt_sovits_en import BUNDLE, FORMAT, MOODS, RUNTIME
 
 POSES = ("wait", "curious", "ponder", "impatient", "smile", "victory", "flustered")
@@ -38,7 +37,7 @@ _STOCK_LAPLAND_PERSONAS = {
 
 
 def library():
-    return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "Mochi" / "characters"
+    return user_data_dir() / "characters"
 
 
 @dataclass

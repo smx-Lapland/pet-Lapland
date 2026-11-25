@@ -1,4 +1,5 @@
 Pillow>=10.0
+pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 edge-tts>=7.2,<8
 miniaudio>=1.61,<2
 webrtcvad-wheels==2.0.14.post1

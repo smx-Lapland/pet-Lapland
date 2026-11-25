@@ -1,0 +1,30 @@
+name: macOS desktop
+on:
+  push:
+    branches: [codex/macos-support]
+  pull_request:
+    paths: ["pet/**", "tests/**", "requirements.txt", "run_pet.command", ".github/workflows/macos.yml"]
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.txt
+      - run: |
+          test -x run_pet.command
+          sh -n run_pet.command
+          .venv/bin/python -m unittest discover -s tests -p test_macos.py -v
+          .venv/bin/python -m unittest discover -s tests -p test_single_instance.py
+          .venv/bin/python -m unittest discover -s tests -p test_delivery.py -k StreamTest

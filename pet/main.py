@@ -10,6 +10,22 @@ INSTANCE_MUTEX = r"Local\pet-Lapland.DesktopInstance"
 
 
 def claim_instance() -> bool:
+    if sys.platform == "darwin":
+        import fcntl
+        from .config import user_data_dir
+
+        directory = user_data_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        lock = (directory / "desktop.lock").open("a+b")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            return False
+        # Keep the inode in place. Process exit releases the advisory lock.
+        atexit.register(lock.close)
+        return True
+
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     create = kernel.CreateMutexExW
     create.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD)
@@ -52,7 +68,7 @@ def main() -> int:
             return 0
     except OSError:
         setup_logging()
-        logging.getLogger("mochi.main").exception("Could not acquire the desktop instance mutex")
+        logging.getLogger("mochi.main").exception("Could not acquire the desktop instance lock")
         return 1
 
     setup_logging()

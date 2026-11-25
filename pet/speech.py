@@ -25,7 +25,7 @@ try:
 except Exception:  # pragma: no cover - only on Windows
     winsound = None
 
-CREATE_NO_WINDOW = 0x08000000
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 class SpeechEngine:
@@ -53,7 +53,8 @@ class SpeechEngine:
         self.muted = bool(cfg.get("muted", False))
         self.verify_italian_voice = bool(cfg.get("verify_italian_voice", False))
         self.script_path = script_path
-        self._powershell = self._find_powershell()
+        self._powershell = self._find_powershell() if sys.platform == "win32" else None
+        self._mac_voice = None
         self._play_lock = threading.Lock()
         self._renderer_lock = threading.Lock()
         self._renderer = None
@@ -65,7 +66,10 @@ class SpeechEngine:
             return [str(self.english_python), str(Path(__file__).with_name("gpt_sovits_en.py"))]
         if self.italian_python and self.device == "cuda":
             return [str(self.italian_python), str(Path(__file__).with_name("italian_reference.py"))]
-        return [getattr(sys, "_base_executable", None) or sys.executable,
+        python = sys.executable
+        if sys.platform == "win32":
+            python = getattr(sys, "_base_executable", None) or python
+        return [python,
                 str(Path(__file__).with_name("neural_worker.py"))]
 
     def _sapi_command(self):
@@ -73,7 +77,11 @@ class SpeechEngine:
                 "Bypass", "-File", str(self.script_path)]
 
     def _neural_env(self):
-        env = {**os.environ, "__PYVENV_LAUNCHER__": sys.executable, "PET_TTS_DEVICE": self.device}
+        env = {**os.environ, "PET_TTS_DEVICE": self.device}
+        if sys.platform == "win32":
+            env["__PYVENV_LAUNCHER__"] = sys.executable
+        else:
+            env.pop("__PYVENV_LAUNCHER__", None)
         if self.provider == "vits" and self.language == "it":
             env["PET_VERIFY_ITALIAN"] = "1" if self.verify_italian_voice else "0"
         if self.english_bundle:
@@ -101,6 +109,8 @@ class SpeechEngine:
     def warmup(self, *, standby=False):
         if self.muted or self.provider not in ("sapi", "vits", "lapland"):
             return
+        if self.provider == "sapi" and sys.platform == "darwin":
+            return  # say renders each utterance directly.
         self._retry_gpu_if_due()
         with self._renderer_lock:
             if self._renderer is not None:
@@ -115,8 +125,9 @@ class SpeechEngine:
                     return
                 self._renderer.stdin.close()
                 self._renderer = None
-            cmd, env = self._sapi_command() + ["-Session"], None
-            if self.provider != "sapi":
+            if self.provider == "sapi":
+                cmd, env = self._sapi_command() + ["-Session"], None
+            else:
                 cmd = self._neural_command() + ["--session", self.provider, self.language]
                 env = self._neural_env()
                 if standby and self.english_bundle:
@@ -234,9 +245,33 @@ class SpeechEngine:
                     break
                 log.warning("Local GPU worker failed; retrying the same voice on CPU")
                 self._use_cpu_fallback()
-            log.warning("%s voice unavailable, using SAPI", provider)
+            log.warning("%s voice unavailable, using system speech", provider)
         paths = self.synthesize([text], stop_event)
         return (paths[0], "sapi") if paths else (None, "unavailable")
+
+    def _render_mac_speech(self, texts, paths, stop_event):
+        if not self._mac_voice:
+            listing = subprocess.run(["/usr/bin/say", "-v", "?"], capture_output=True,
+                                     text=True, encoding="utf-8", check=True, timeout=10).stdout
+            voices = []
+            for line in listing.splitlines():
+                match = re.match(r"^(.+?)\s+([a-z]{2,3})[_-]\S+\s+#", line)
+                if match and match[2] == self.language:
+                    voices.append(match[1].strip())
+            if not voices:
+                log.warning("No macOS system voice installed for %s", self.language)
+                return False
+            self._mac_voice = next((v for v in voices if v.casefold() == self.voice.casefold()), voices[0])
+        for text, path in zip(texts, paths):
+            command = ["/usr/bin/say", "-v", self._mac_voice, "-o", str(path),
+                       "--file-format=WAVE", "--data-format=LEI16@22050"]
+            if self.rate:
+                command.extend(["-r", str(round(180 * 2 ** (max(-10, min(10, self.rate)) / 10)))])
+            if not run_worker(command, stop_event, 30, sanitize_for_tts(text, self.language).encode("utf-8")):
+                return False
+            if wav_duration(path) <= 0:
+                return False
+        return True
 
     def synthesize(self, texts: list[str], stop_event=None) -> list[Path] | None:
         texts = [t for t in texts if t.strip()]
@@ -258,6 +293,9 @@ class SpeechEngine:
         }
         success = False
         try:
+            if sys.platform == "darwin":
+                success = self._render_mac_speech(texts, paths, stop_event)
+                return paths if success else None
             job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
             ok = run_worker(
                 self._sapi_command() + ["-JobFile", str(job_path), "-ResultFile", str(result_path)],
@@ -292,7 +330,11 @@ class SpeechEngine:
                     pass
 
     def play_file(self, path: Path, stop_event) -> bool:
-        if self.muted or winsound is None:
+        if self.muted or stop_event.is_set():
+            return False
+        if sys.platform == "darwin":
+            return run_worker(["/usr/bin/afplay", str(path)], stop_event, wav_duration(path) + 10)
+        if winsound is None:
             return False
         try:
             duration = wav_duration(path)

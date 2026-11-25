@@ -12,7 +12,7 @@ _dll_directories = []
 
 def venv_python(venv):
     """Return the base executable so cancellation reaches inference directly on Windows."""
-    if (venv / "Scripts/python.exe").is_file():
+    if os.name == "nt" and (venv / "Scripts/python.exe").is_file():
         for line in (venv / "pyvenv.cfg").read_text("utf8").splitlines():
             key, _, value = line.partition("=")
             if key.strip() == "home":
@@ -22,7 +22,7 @@ def venv_python(venv):
 
 
 def cuda_installed():
-    return (CUDA_RUNTIME / "onnxruntime/capi/onnxruntime_providers_cuda.dll").is_file()
+    return os.name == "nt" and (CUDA_RUNTIME / "onnxruntime/capi/onnxruntime_providers_cuda.dll").is_file()
 
 
 @lru_cache(maxsize=1)

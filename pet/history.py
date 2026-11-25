@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+from .config import user_data_dir
 import hashlib
 import sqlite3
 import re
@@ -83,8 +83,7 @@ class ConversationHistory:
     """Store completed text turns separately from the model's active context."""
 
     def __init__(self, path: Path | None = None):
-        local = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        self.path = path or local / "Mochi" / "history.sqlite3"
+        self.path = path or user_data_dir() / "history.sqlite3"
 
     @classmethod
     def for_scope(cls, project, session):

@@ -15,7 +15,7 @@ from pet.llm import DeepSeekClient
 
 class CharacterTest(unittest.TestCase):
     def test_lapland_chat_uses_examples_for_the_selected_language(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp, HOME=tmp):
             builtin = character("lapland")
             pack = Path(tmp) / "lapland.petpack"
             write_pack(pack, builtin.data, {"portrait.png": builtin.sprite("wait")})
@@ -61,7 +61,7 @@ class CharacterTest(unittest.TestCase):
         self.assertEqual(answer["segments"][0]["emotion"], "WHISPER")
 
     def test_share_import_and_use_new_persona(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp, "HOME": tmp}):
             role = character("muelsyse")
             data = {**role.data, "settings": {**role.data["settings"], "_api_key": "never-export",
                                               "model_key_env": "MY_CHAT_KEY", "tts_key_env": "MY_VOICE_KEY",
@@ -93,7 +93,7 @@ class CharacterTest(unittest.TestCase):
     def test_only_unedited_stock_lapland_pack_inherits_updated_dialogue(self):
         old = "An old stock persona\nwith two lines"
         fingerprint = hashlib.sha256(old.encode()).hexdigest()
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp), \
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp, HOME=tmp), \
                 patch("pet.characters._STOCK_LAPLAND_PERSONAS", {fingerprint}):
             role = character()
             p = Path(tmp) / "test.petpack"
@@ -104,7 +104,7 @@ class CharacterTest(unittest.TestCase):
                 self.assertEqual(loaded.data["persona"], expected)
 
     def test_invalid_pack_does_not_install(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp, "HOME": tmp}):
             raw = io.BytesIO()
             with zipfile.ZipFile(raw, "w") as z:
                 z.writestr("../injected", "bad")
@@ -118,7 +118,7 @@ class CharacterTest(unittest.TestCase):
 
     def test_english_weight_file_must_be_a_voice_tensor_bundle(self):
         from pet.gpt_sovits_en import BUNDLE
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, LOCALAPPDATA=tmp, HOME=tmp):
             role = character("lapland")
             pack = Path(tmp) / "role.petpack"
             assets = image_files(role)

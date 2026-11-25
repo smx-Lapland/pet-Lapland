@@ -6,6 +6,7 @@ import json
 import random
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import wave
@@ -73,7 +74,6 @@ def render_review(folder):
 def play_review_preview(folder):
     """Play one bilingual WAV after a completed voice review, without opening a player."""
     import miniaudio
-    import winsound
 
     sample_rate = 32000
     takes = [miniaudio.decode_file(str(folder / "audio" / f"08-{lang}-1.wav"),
@@ -83,7 +83,11 @@ def play_review_preview(folder):
     with wave.open(str(preview), "wb") as output:
         output.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
         output.writeframes(takes[0] + bytes(sample_rate) + takes[1])
-    winsound.PlaySound(str(preview), winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+    if sys.platform == "darwin":
+        subprocess.run(["/usr/bin/afplay", str(preview)], check=True)
+    else:
+        import winsound
+        winsound.PlaySound(str(preview), winsound.SND_FILENAME | winsound.SND_NODEFAULT)
 
 
 def generate(job):

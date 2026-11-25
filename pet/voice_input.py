@@ -167,7 +167,7 @@ class VoiceInput:
             self.device.start(stream)
         except Exception as exc:
             self.finish()
-            raise VoiceInputError("无法打开麦克风。请检查 Windows 默认输入设备和麦克风权限。") from exc
+            raise VoiceInputError("无法打开麦克风。请检查系统默认输入设备和麦克风权限。") from exc
         if self.recognizer is None and not (self.loading and self.loading.is_alive()):
             self.loading = threading.Thread(target=self._warm_up, daemon=True, name="mic-model-load")
             self.loading.start()

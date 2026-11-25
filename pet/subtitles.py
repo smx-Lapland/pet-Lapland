@@ -1,4 +1,5 @@
 """Two lines per language, synchronized to one playback timeline."""
+import sys
 import time
 import tkinter as tk
 
@@ -25,7 +26,6 @@ class ScrollingCaptions(tk.Canvas):
             self.create_window(0, offset, anchor="nw", window=track)
             self.tracks.append(track)
             track.bind("<MouseWheel>", self._wheel)
-            track.bind("<Button-3>", lambda e: self.event_generate("<Button-3>", rootx=e.x_root, rooty=e.y_root))
         self.timer = None
         self.duration = None
         self.manual = False
@@ -99,7 +99,8 @@ class ScrollingCaptions(tk.Canvas):
     def _wheel(self, event):
         if any(self.overflow):
             self.stop()
-            self._position(self.progress - event.delta / 120 * max(self.line_heights) / max(self.overflow))
+            steps = event.delta if sys.platform == "darwin" else event.delta / 120
+            self._position(self.progress - steps * max(self.line_heights) / max(self.overflow))
         return "break"
 
     def stop(self):

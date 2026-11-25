@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import sys
 import threading
 from .network import validate_endpoint
 from pathlib import Path
@@ -14,6 +15,12 @@ CONFIG_PATH = APP_DIR / "config.json"
 CACHE_DIR = APP_DIR / "cache"
 CAPTURE_DIR = APP_DIR / "captures"
 LOG_PATH = APP_DIR / "pet.log"
+
+
+def user_data_dir() -> Path:
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Mochi"
+    return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Mochi"
 
 DEFAULTS: dict[str, Any] = {
     "model": "deepseek-flash",

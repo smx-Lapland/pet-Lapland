@@ -162,7 +162,7 @@ class ConnectionsTest(unittest.TestCase):
                 server.shutdown()
 
     def test_project_memory_isolation_and_resume(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp, "HOME": tmp}):
             first = ConversationHistory.for_scope("a", "")
             first.remember("only A")
             first.append("topic", "title", "ask\n\nTitle\n\nOK\n答", "ask")

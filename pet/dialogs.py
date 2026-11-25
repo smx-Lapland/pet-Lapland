@@ -212,7 +212,7 @@ class SettingsDialog(tk.Toplevel):
             ("mic_threshold", "连续对话收音门槛", cfg.get("mic_threshold", "较高")),
             ("speech_provider", "语音服务", cfg["speech_provider"]),
             ("voice_device", "本地神经语音运算", DEVICE_LABELS.get(cfg.get("voice_device"), DEVICE_LABELS["auto"])),
-            ("voice", "系统声音（SAPI）", cfg["voice"]),
+            ("voice", "系统朗读音色", cfg["voice"]),
             ("neural_voice", "云端英语音色", cfg["neural_voice"]),
             ("neural_voice_it", "云端意大利语音色", cfg.get("neural_voice_it", "it-IT-ElsaNeural")),
             ("rate", "语速（−10 至 10）", str(cfg["rate"])),

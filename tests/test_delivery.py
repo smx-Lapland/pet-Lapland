@@ -117,9 +117,9 @@ class VoiceTest(unittest.TestCase):
     def test_review_plays_one_file_for_both_languages(self):
         import struct
         import wave
-        import winsound
         from tools.evaluate_dialogue import play_review_preview
-        with tempfile.TemporaryDirectory() as tmp, patch.object(winsound, "PlaySound") as play:
+        play_fn = "tools.evaluate_dialogue.subprocess.run" if sys.platform == "darwin" else "winsound.PlaySound"
+        with tempfile.TemporaryDirectory() as tmp, patch(play_fn) as play:
             folder = Path(tmp)
             (folder / "audio").mkdir()
             for lang, rate, value in (("en", 32000, 2000), ("it", 22050, -2000)):
@@ -128,7 +128,11 @@ class VoiceTest(unittest.TestCase):
                     take.writeframes(struct.pack("<h", value) * rate)
             play_review_preview(folder)
             target = folder / "preview.wav"
-            play.assert_called_once_with(str(target), winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+            if sys.platform == "darwin":
+                play.assert_called_once_with(["/usr/bin/afplay", str(target)], check=True)
+            else:
+                import winsound
+                play.assert_called_once_with(str(target), winsound.SND_FILENAME | winsound.SND_NODEFAULT)
             with wave.open(str(target)) as joined:
                 self.assertAlmostEqual(joined.getnframes() / joined.getframerate(), 2.5, places=2)
                 for seconds, expected in ((.5, 2000), (1.25, 0), (2., -2000)):

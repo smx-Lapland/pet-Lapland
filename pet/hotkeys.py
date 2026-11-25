@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import sys
 import threading
 from ctypes import wintypes
 from queue import Queue
@@ -24,6 +25,8 @@ MOD_NAMES = {
     "win": MOD_WIN,
     "meta": MOD_WIN,
 }
+if sys.platform == "darwin":
+    MOD_NAMES.update(cmd=MOD_WIN, command=MOD_WIN, option=MOD_ALT)
 
 KEY_NAMES = {
     "space": 0x20,
@@ -71,11 +74,17 @@ def parse_hotkey(spec: str) -> tuple[int, int, str] | None:
             return None
     if key is None:
         return None
-    label = " + ".join(("Ctrl" if p in ("ctrl", "control") else "Alt" if p == "alt" else "Shift" if p == "shift" else "Win" if p in ("win", "meta") else p.upper()) for p in parts)
+    if sys.platform == "darwin":
+        from .mac_hotkeys import KEY_CODES
+        if key not in KEY_CODES:
+            return None
+    names = {MOD_CONTROL: "Ctrl", MOD_ALT: "Option" if sys.platform == "darwin" else "Alt",
+             MOD_SHIFT: "Shift", MOD_WIN: "Cmd" if sys.platform == "darwin" else "Win"}
+    label = " + ".join(names.get(MOD_NAMES.get(p), p.upper()) for p in parts)
     return mods, key, label
 
 
-class HotkeyManager(threading.Thread):
+class WindowsHotkeys(threading.Thread):
     def __init__(self, bindings: dict[str, str], event_queue: Queue):
         super().__init__(name="mochi-hotkeys", daemon=True)
         self.bindings = bindings
@@ -135,3 +144,10 @@ class HotkeyManager(threading.Thread):
         self._stopping.set()
         if self._thread_id:
             self._user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+        self.join(timeout=1)
+
+
+if sys.platform == "darwin":
+    from .mac_hotkeys import MacHotkeys as HotkeyManager
+else:
+    HotkeyManager = WindowsHotkeys
