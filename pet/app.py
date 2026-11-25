@@ -24,8 +24,8 @@ from .character_dialog import CharacterDialog
 from . import dsh_tasks
 from .dsh_projects import project_context, projects
 from .task_dialog import TaskDialog
-from .dialogs import CapturePreview, HistoryDialog, MemoryDialog, SettingsDialog
-from .history import ConversationHistory, changes_subject, recent_messages, requests_recall
+from .dialogs import CapturePreview, HistoryDialog, MemoryDialog, PanelSizeDialog, SettingsDialog
+from .history import ConversationHistory, asks_about_capture, changes_subject, recent_messages, requests_recall
 from .hotkeys import HotkeyManager
 from .llm import DeepSeekClient, LLMError
 from .screen import (
@@ -57,7 +57,7 @@ SPRITES = APP_DIR / "assets" / "lapland"
 DEFAULT_CAPTURE_QUESTION = "Explain what this is and what I should notice."
 
 
-def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, r: float, **kwargs):
+def rounded_points(x1: float, y1: float, x2: float, y2: float, r: float):
     points: list[float] = []
     steps = 7
     for cx, cy, start in (
@@ -69,7 +69,11 @@ def rounded_rect(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float, 
         for index in range(steps + 1):
             angle = math.radians(start + 90 * index / steps)
             points.extend([cx + r * math.cos(angle), cy + r * math.sin(angle)])
-    return canvas.create_polygon(points, smooth=True, **kwargs)
+    return points
+
+
+def rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+    return canvas.create_polygon(rounded_points(x1, y1, x2, y2, radius), smooth=True, **kwargs)
 
 
 def thinking_pose(elapsed: float) -> str:
@@ -89,6 +93,7 @@ def thinking_pose(elapsed: float) -> str:
 class MochiApp:
     W, H = 960, 430
     PET_WIDTH = 167
+    PET_HEIGHT = 430
     PANEL_IDLE_SECONDS = 30
     CONTENT_X = 198
     CAPTION_Y = 161
@@ -179,6 +184,13 @@ class MochiApp:
         self._build_bubble()
         self._build_input()
         self._build_pet()
+        self.resize_origin = self.resize_target = self.resize_timer = None
+        saved_size = self.cfg.get("panel_size")
+        if not isinstance(saved_size, dict):
+            saved_size = {}
+        width = saved_size.get("width")
+        height = saved_size.get("height")
+        self._resize_panel(width if type(width) is int else 793, height if type(height) is int else 430)
         self._build_menu()
         self._bind_events()
         self._show_idle()
@@ -209,7 +221,6 @@ class MochiApp:
         saved = self.cfg.get("window") or {}
         x, y = saved.get("x"), saved.get("y")
         left, top, right, bottom = work_area()
-        self.W = min(self.W, max(720, right - left - 26))
         if not isinstance(x, int) or not isinstance(y, int):
             x = right - self.PET_WIDTH - 26
             y = bottom - self.H - 18
@@ -227,6 +238,107 @@ class MochiApp:
             save_config(self.cfg)
         except Exception:
             log.exception("could not save window position")
+
+    def _panel_area(self):
+        return work_area(self.root.winfo_x() + self.PET_WIDTH // 2, self.root.winfo_y() + 35)
+
+    def _panel_limits(self, area):
+        left, top, right, bottom = area
+        max_w, max_h = max(1, right - left - self.PET_WIDTH), max(1, bottom - top)
+        return min(552, max_w), min(380, max_h), max_w, max_h
+
+    def _resize_panel(self, width, height):
+        area = self._panel_area()
+        min_w, min_h, max_w, max_h = self._panel_limits(area)
+        width = min(max_w, max(min_w, width)) + self.PET_WIDTH
+        height = min(max_h, max(min_h, height))
+        dx, dy = width - self.W, height - self.H
+        self.W, self.H = width, height
+        if dx or dy:
+            c = self.canvas
+            right = width - 16
+            cap_y = max(125, 161 + min(0, height - 430)) + round(max(0, height - 430) * .35)
+            self.CAPTION_Y = cap_y
+            c.coords(self.panel_border, *rounded_points(167, 7, right + 1, height - 15, 24))
+            c.coords(self.panel_shadow, *rounded_points(174, 16, right + 6, height - 8, 28))
+            c.move("header_right", dx, 0)
+            c.coords(self.headline_en_id, self.CONTENT_X, 78 + round(min(0, cap_y - 161) * .60))
+            c.coords(self.headline_zh_id, self.CONTENT_X, 122 + round(min(0, cap_y - 161) * .83))
+            if hasattr(self, "headlines"):
+                self._set_headline(*self.headlines)
+            c.coords(self.divider, self.CONTENT_X, cap_y - 8, width - 50, cap_y - 8)
+            c.coords(self.caption_window, self.CONTENT_X, cap_y)
+            self.captions.resize_width(self.subtitle_width)
+            skin = self._backdrop()
+            self.bubble_skin = ImageTk.PhotoImage(skin, master=self.root)
+            c.itemconfigure(self.skin_item, image=self.bubble_skin)
+            self.captions.set_backdrop(skin, self.CONTENT_X - 168, cap_y - 8)
+            project_y = max(height - 132, cap_y + self.captions.height + 16)
+            c.coords(self.project_window, self.CONTENT_X, project_y)
+            c.coords(self.capture_window, self.CONTENT_X + 230, project_y)
+            c.coords(self.input_bg_id, *rounded_points(190, height - 100, width - 38, height - 50, 13))
+            c.itemconfigure(self.entry_window_id, width=width - 320)
+            for item in (self.entry_window_id, self.input_prompt_id, self.hint_id):
+                c.move(item, 0, dy)
+            for item in (self.ask_bg_id, self.ask_text_id, self.input_shortcut_id, self.grip_window):
+                c.move(item, dx, dy)
+        if self.panel_open:
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            if self.resize_origin:
+                _, _, w0, h0, x, y, reverse = self.resize_origin
+                if reverse:
+                    x += w0 - width
+                    y += h0 - height
+            left, top, right, bottom = area
+            x, y = max(left, min(x, right - width)), max(top, min(y, bottom - height))
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _save_panel_size(self):
+        self.cfg["panel_size"] = {"width": self.W - self.PET_WIDTH, "height": self.H}
+        save_config(self.cfg)
+
+    def show_panel_size(self):
+        if self.dialog or self.capturing:
+            return
+        def apply(width, height):
+            self._open_panel()
+            self._resize_panel(width, height)
+            self._save_panel_size()
+        self.dialog = PanelSizeDialog(self.root, (self.W - self.PET_WIDTH, self.H),
+                                     self._panel_limits(self._panel_area()), apply, self._close_dialog)
+
+    def _begin_resize(self, event, reverse=False):
+        self.resize_origin = (event.x_root, event.y_root, self.W, self.H,
+                              self.root.winfo_x(), self.root.winfo_y(), reverse)
+        return "break"
+
+    def _drag_resize(self, event):
+        if self.resize_origin:
+            x, y, w, h, _, _, reverse = self.resize_origin
+            sign = -1 if reverse else 1
+            self.resize_target = (w - self.PET_WIDTH + sign * (event.x_root - x), h + sign * (event.y_root - y))
+            if self.resize_timer is None:
+                self.resize_timer = self.root.after(30, self._flush_resize)
+        return "break"
+
+    def _flush_resize(self):
+        self.resize_timer = None
+        if self.resize_target:
+            self._resize_panel(*self.resize_target)
+            self.resize_target = None
+
+    def _finish_resize(self):
+        if self.resize_origin:
+            if self.resize_timer is not None:
+                self.root.after_cancel(self.resize_timer)
+            self._flush_resize()
+            self.resize_origin = None
+            self._save_panel_size()
+
+    def _end_resize(self, event):
+        self._drag_resize(event)
+        self._finish_resize()
+        return "break"
 
     def _restore_window(self) -> None:
         self.root.deiconify()
@@ -279,13 +391,12 @@ class MochiApp:
             self.panel_open = True
             x, y = self.root.winfo_x(), self.root.winfo_y()
             self.compact_position = (x, y)
-            vx, _, vw, _ = virtual_screen()
-            x = max(vx, min(x, vx + vw - self.W))
-            self.root.geometry(f"{self.W}x{self.H}+{x}+{y}")
+            self._resize_panel(self.W - self.PET_WIDTH, self.H)
             self.canvas.itemconfigure(self.tail_id, state="normal")
             self.canvas.itemconfigure(self.project_window, state="normal")
             self.canvas.itemconfigure(self.talk_window, state="normal")
             self.canvas.itemconfigure(self.conversation_window, state="normal")
+            self._update_capture_choice()
             self._warm_voice_for_input()
 
     def _close_panel(self):
@@ -299,11 +410,17 @@ class MochiApp:
         self.canvas.itemconfigure(self.project_window, state="hidden")
         self.canvas.itemconfigure(self.talk_window, state="hidden")
         self.canvas.itemconfigure(self.conversation_window, state="hidden")
-        geometry = f"{self.PET_WIDTH}x{self.H}"
+        self._update_capture_choice()
+        self._finish_resize()
+        geometry = f"{self.PET_WIDTH}x{self.PET_HEIGHT}"
         if self.compact_position:
             x, y = self.compact_position
             geometry += f"+{x}+{y}"
             self.compact_position = None
+        else:
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            left, top, right, bottom = work_area(x + self.PET_WIDTH // 2, y + 35)
+            geometry += f"+{max(left, min(x, right-self.PET_WIDTH))}+{max(top, min(y, bottom-self.PET_HEIGHT))}"
         self.root.geometry(geometry)
 
     def _check_panel(self):
@@ -314,7 +431,8 @@ class MochiApp:
             px, py = self.root.winfo_pointerxy()
             x, y = px - self.root.winfo_rootx(), py - self.root.winfo_rooty()
             reading = self.PET_WIDTH <= x < self.W and 0 <= y < self.H
-            busy = self.awaiting_answer or self.conversation or self.voice_turn or self.speech_stop or self.input_visible
+            busy = (self.awaiting_answer or self.conversation or self.voice_turn or self.speech_stop
+                    or self.input_visible or self.resize_origin)
             if reading or busy or self.capturing or self.dialog:
                 self.panel_active_at = now
             elif now - self.panel_active_at >= self.PANEL_IDLE_SECONDS:
@@ -330,7 +448,7 @@ class MochiApp:
 
     def _backdrop(self):
         if self.character.id != "lapland":
-            frame = Image.new("RGBA", (self.W - 184, 407), BUBBLE)
+            frame = Image.new("RGBA", (self.W - 184, self.H - 23), BUBBLE)
             background = self.character.folder / "background.png"
             with Image.open(background if background.is_file() else self.character.sprite("wait")) as img:
                 if background.is_file():
@@ -343,19 +461,21 @@ class MochiApp:
             return Image.blend(Image.new("RGBA", frame.size, BUBBLE), frame, .22)
         with Image.open(SPRITES / "dialog-skin.webp") as skin:
             extra = self.W - 184 - skin.width
+            if extra < 0:
+                return ImageOps.fit(skin.convert("RGBA"), (self.W - 184, self.H - 24))
             backdrop = Image.new("RGBA", (skin.width + extra, skin.height))
             backdrop.paste(skin.crop((0, 0, 24, skin.height)), (0, 0))
             shade = skin.crop((24, 0, 78, skin.height))
             backdrop.paste(shade.resize((shade.width + extra, skin.height), Image.Resampling.BICUBIC), (24, 0))
             backdrop.paste(skin.crop((78, 0, skin.width, skin.height)), (78 + extra, 0))
-            return backdrop
+            return backdrop.resize((backdrop.width, self.H - 24), Image.Resampling.BICUBIC)
 
     def _build_bubble(self) -> None:
         c = self.canvas
         right = self.W - 16
-        rounded_rect(c, 174, 16, right + 6, 422, 28, fill=BUBBLE_SHADOW, outline="")
+        self.panel_shadow = rounded_rect(c, 174, 16, right + 6, 422, 28, fill=BUBBLE_SHADOW, outline="")
         self.tail_id = c.create_polygon(176, 258, 126, 288, 176, 318, fill=BUBBLE, outline="", smooth=True)
-        rounded_rect(c, 167, 7, right + 1, 415, 24, fill=BUBBLE_BORDER, outline="")
+        self.panel_border = rounded_rect(c, 167, 7, right + 1, 415, 24, fill=BUBBLE_BORDER, outline="")
         skin = self._backdrop()
         self.bubble_skin = ImageTk.PhotoImage(skin, master=self.root)
         self.skin_item = c.create_image(168, 8, anchor="nw", image=self.bubble_skin)
@@ -368,7 +488,7 @@ class MochiApp:
         self.talk_button = tk.Button(self.root, text="按住说话", font=("Microsoft YaHei UI", -12),
                                      bg=CONTROL, fg=CREAM, activebackground=TEAL, relief="flat",
                                      bd=0, cursor="hand2", takefocus=False)
-        self.talk_window = c.create_window(right - 301, 35, window=self.talk_button, width=94, height=28,
+        self.talk_window = c.create_window(right - 209, 35, window=self.talk_button, width=94, height=28,
                                            state="hidden")
         self.talk_button.bind("<ButtonPress-1>", self._press_to_talk)
         self.talk_button.bind("<ButtonRelease-1>", self._release_to_talk)
@@ -376,12 +496,14 @@ class MochiApp:
         self.conversation_button = tk.Button(
             self.root, text="开始对话", command=self._toggle_conversation, font=("Microsoft YaHei UI", -12),
             bg=TEAL, fg=BUBBLE, relief="flat", bd=0, cursor="hand2")
-        self.conversation_window = c.create_window(right - 197, 35, window=self.conversation_button,
+        self.conversation_window = c.create_window(right - 105, 35, window=self.conversation_button,
                                                     width=94, height=28, state="hidden")
         self.close_id = c.create_text(
             right - 22, 33, text="×", anchor="center", fill=MUTED, font=("Segoe UI", -22)
         )
         close_hit = c.create_oval(right - 40, 18, right - 4, 52, fill=BUBBLE, outline="")
+        for item in (self.talk_window, self.conversation_window, self.close_id, close_hit):
+            c.addtag_withtag("header_right", item)
         c.tag_lower(close_hit, self.close_id)
         c.tag_bind(close_hit, "<Button-1>", lambda _e: self._close_panel())
         c.tag_bind(self.close_id, "<Button-1>", lambda _e: self._close_panel())
@@ -401,9 +523,9 @@ class MochiApp:
         self.captions = ScrollingCaptions(c, self.subtitle_width, (self.spoken_font, self.translation_font),
                                           (WHITE, CREAM))
         self.captions.set_backdrop(skin, self.CONTENT_X - 168, self.CAPTION_Y - 8)
-        c.create_window(self.CONTENT_X, self.CAPTION_Y, anchor="nw", window=self.captions)
+        self.caption_window = c.create_window(self.CONTENT_X, self.CAPTION_Y, anchor="nw", window=self.captions)
         self.captions.bind("<Button-3>", self._popup_menu)
-        c.create_line(self.CONTENT_X, 153, self.CONTENT_X + self.subtitle_width, 153, fill="#645863")
+        self.divider = c.create_line(self.CONTENT_X, 153, self.CONTENT_X + self.subtitle_width, 153, fill="#645863")
         self.project_button = tk.Menubutton(c, bg=CONTROL, fg=CREAM, activebackground=TEAL,
                                           relief="flat", indicatoron=True, anchor="w",
                                           font=("Microsoft YaHei UI", -13), cursor="hand2")
@@ -413,9 +535,28 @@ class MochiApp:
         self._project_label()
         self.project_window = c.create_window(self.CONTENT_X, 298, anchor="w", window=self.project_button,
                                               width=220, height=28, state="hidden")
+        self.attach_capture = tk.BooleanVar(self.root)
+        self.capture_choice = tk.Checkbutton(c, text="本次带上截图", variable=self.attach_capture,
+                                             bg=BUBBLE, fg=CREAM, selectcolor=CONTROL, activebackground=BUBBLE,
+                                             activeforeground=CREAM, font=("Microsoft YaHei UI", -12), bd=0)
+        self.capture_window = c.create_window(self.CONTENT_X + 230, 298, anchor="w",
+                                               window=self.capture_choice, state="hidden")
         self.hint_id = c.create_text(
             198, 393, text="", anchor="w", fill=MUTED, font=("Microsoft YaHei UI", -12),
         )
+        for reverse in (False, True):
+            grip = tk.Canvas(c, width=18, height=18, highlightthickness=0, bd=0,
+                             cursor="size_nw_se", bg=BUBBLE)
+            for length in (5, 10, 15):
+                points = (2, length, length, 2) if reverse else (17-length, 16, 16, 17-length)
+                grip.create_line(*points, fill=MUTED)
+            if reverse:
+                c.create_window(177, 14, anchor="nw", window=grip)
+            else:
+                self.grip_window = c.create_window(right - 5, self.H - 20, anchor="se", window=grip)
+            grip.bind("<ButtonPress-1>", lambda e, rev=reverse: self._begin_resize(e, rev))
+            grip.bind("<B1-Motion>", self._drag_resize)
+            grip.bind("<ButtonRelease-1>", self._end_resize)
 
     def _build_input(self) -> None:
         c = self.canvas
@@ -504,7 +645,7 @@ class MochiApp:
             bd=0,
         )
         menu.add_command(label=self._shortcut_text("Capture region   Ctrl+Alt+S"), command=self.begin_capture)
-        menu.add_command(label=self._shortcut_text("Ask about this screen   Ctrl+Alt+Space"), command=self.toggle_input)
+        menu.add_command(label=self._shortcut_text("输入问题   Ctrl+Alt+Space"), command=self.toggle_input)
         menu.add_separator()
         menu.add_command(label="Stop speaking", command=self.stop_speech)
         self._mute_index = menu.index("end") + 1
@@ -516,6 +657,7 @@ class MochiApp:
         menu.add_command(label="模型与项目…", command=self.show_connections)
         menu.add_command(label="交给 DSH 执行…", command=self.show_project_task)
         menu.add_command(label="角色与迁移…", command=self.show_characters)
+        menu.add_command(label="对话框尺寸…", command=self.show_panel_size)
         menu.add_command(label="设置…", command=self.show_settings)
         menu.add_separator()
         menu.add_command(label=self._shortcut_text("Quit   Ctrl+Alt+Q"), command=self.quit)
@@ -674,6 +816,7 @@ class MochiApp:
             self.awaiting_answer = self.stream_started = False
             if scope_changed or cfg["api_base"] != self.cfg["api_base"]:
                 self.last_image = None
+                self._update_capture_choice()
             self.last_answer = None
         self.stop_speech()
         self.cfg = cfg
@@ -721,6 +864,7 @@ class MochiApp:
             self.history.clear()
             self.transcript.clear()
             self.last_image = self.last_answer = None
+            self._update_capture_choice()
             self._show_idle()
 
     def show_memories(self):
@@ -789,11 +933,12 @@ class MochiApp:
         self._set_hint("Ctrl+Alt+S 框选   ·   右键查看对话历史")
 
     def _set_headline(self, en: str, zh: str) -> None:
+        self.headlines = (en, zh)
         for item, text, font in [(self.headline_en_id, en, self.title_font),
                                  (self.headline_zh_id, zh, self.title_zh_font)]:
             text = " ".join(text.split())
-            if font.measure(text) > 342:
-                while text and font.measure(text + "…") > 342:
+            if font.measure(text) > self.subtitle_width:
+                while text and font.measure(text + "…") > self.subtitle_width:
                     text = text[:-1]
                 text = text.rstrip() + "…"
             self._set_text(item, text)
@@ -968,8 +1113,7 @@ class MochiApp:
             self._set_hint("没听清。请按住说话，说完再松开。")
             self._resume_conversation()
         else:
-            self._start_ask(self.last_image, text, follow_up=self.last_image is not None,
-                            from_conversation=self.conversation is not None)
+            self._ask_from_input(text, from_conversation=self.conversation is not None)
             if self.awaiting_answer:
                 self._show_content("", "你说：" + text)
                 self._set_hint(f"正在等{self.character.data['name']}回答")
@@ -1098,10 +1242,19 @@ class MochiApp:
         self.input_var.set("")
         self.hide_input()
         self.stop_speech(keep_idle=True)
-        if self.last_image is not None:
-            self._start_ask(self.last_image, text, follow_up=True)
-        else:
-            self._start_ask(None, text, follow_up=False)
+        self._ask_from_input(text)
+
+    def _update_capture_choice(self):
+        available = self.panel_open and self.last_image is not None
+        if not available:
+            self.attach_capture.set(False)
+        self.canvas.itemconfigure(self.capture_window, state="normal" if available else "hidden")
+
+    def _ask_from_input(self, text, *, from_conversation=False):
+        use_image = self.last_image is not None and (self.attach_capture.get() or asks_about_capture(text))
+        self.attach_capture.set(False)
+        self._start_ask(self.last_image if use_image else None, text, follow_up=use_image,
+                        from_conversation=from_conversation)
 
     # ---------- capture ----------
 
@@ -1180,6 +1333,8 @@ class MochiApp:
         self._restore_window()
         self.hide_input()
         self.last_image = image
+        self.attach_capture.set(False)
+        self._update_capture_choice()
         self.last_answer = None
         self.history = []
         self.transcript.clear()
@@ -1195,8 +1350,11 @@ class MochiApp:
     # ---------- model ----------
 
     def _start_ask(self, image, question: str, follow_up: bool, *, from_conversation=False) -> None:
-        if changes_subject(question):
+        leaving_capture = image is None and self.last_image is not None
+        if changes_subject(question) or leaving_capture:
             self.last_image = image = None
+            self.last_answer = None
+            self._update_capture_choice()
             self.history.clear()
             self.transcript.clear()
             self.topic = uuid.uuid4().hex
@@ -1234,7 +1392,7 @@ class MochiApp:
         context = {}
         try:
             if not fresh_capture and not changes_subject(question):
-                if self.cfg["save_history"] and requests_recall(question):
+                if not leaving_capture and self.cfg["save_history"] and requests_recall(question):
                     context = self.archive.handoff(self.topic, len(history)//2)
                 notes = self.archive.relevant_notes(question)
                 if notes:
@@ -1575,7 +1733,7 @@ class MochiApp:
         vx, vy, vw, vh = virtual_screen()
         width = self.W if self.panel_open else self.PET_WIDTH
         x = max(vx, min(self.drag_origin[0] + dx, vx + vw - width))
-        y = max(vy, min(self.drag_origin[1] + dy, vy + vh - self.H))
+        y = max(vy, min(self.drag_origin[1] + dy, vy + vh - (self.H if self.panel_open else self.PET_HEIGHT)))
         self.root.geometry(f"+{x}+{y}")
 
     def _pet_release(self, _event) -> None:

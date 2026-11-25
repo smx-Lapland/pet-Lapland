@@ -40,5 +40,9 @@
   "window": {
     "x": null,
     "y": null
+  },
+  "panel_size": {
+    "width": 793,
+    "height": 430
   }
 }

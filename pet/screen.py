@@ -37,8 +37,20 @@ def virtual_screen() -> tuple[int, int, int, int]:
     return x, y, w, h
 
 
-def work_area() -> tuple[int, int, int, int]:
+def work_area(x=None, y=None) -> tuple[int, int, int, int]:
     rect = wintypes.RECT()
+    if x is not None and y is not None:
+        class MonitorInfo(ctypes.Structure):
+            _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT),
+                        ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
+        user = ctypes.windll.user32
+        user.MonitorFromPoint.argtypes = (wintypes.POINT, wintypes.DWORD)
+        user.MonitorFromPoint.restype = wintypes.HANDLE
+        monitor = user.MonitorFromPoint(wintypes.POINT(x, y), 2)
+        info = MonitorInfo()
+        info.size = ctypes.sizeof(info)
+        if user.GetMonitorInfoW(wintypes.HANDLE(monitor), ctypes.byref(info)):
+            return (info.work.left, info.work.top, info.work.right, info.work.bottom)
     try:
         if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
             return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)

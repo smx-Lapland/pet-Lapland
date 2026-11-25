@@ -55,6 +55,7 @@ DEFAULTS: dict[str, Any] = {
         "quit": "ctrl+alt+q",
     },
     "window": {"x": None, "y": None},
+    "panel_size": {"width": 793, "height": 430},
 }
 
 _write_lock = threading.Lock()

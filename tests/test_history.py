@@ -4,10 +4,18 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from pet.history import ConversationHistory, recent_messages
+from pet.history import ConversationHistory, asks_about_capture, recent_messages
 
 
 class HistoryTest(unittest.TestCase):
+    def test_capture_references_are_specific_to_the_question(self):
+        for text in ("这张图里的红字怎么改？", "请解释一下截图里写的内容", "What's in this screenshot?",
+                     "Cosa c’è nello screenshot?"):
+            self.assertTrue(asks_about_capture(text), text)
+        for text in ("今晚吃什么？", "教我怎么截屏", "如何上传图片？", "这张截图先不聊，我想问个别的",
+                     "换个话题，这张图不用管了", "Where can I take a screenshot?"):
+            self.assertFalse(asks_about_capture(text), text)
+
     def test_recall_is_scoped_to_the_current_exchange(self):
         history = [{"role": "user", "content": "车票怎么退？"}, {"role": "assistant", "content": "看订单。"},
                    {"role": "user", "content": "我的铅笔掉地上了。"}, {"role": "assistant", "content": "在桌脚旁。"}]

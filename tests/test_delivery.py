@@ -474,7 +474,7 @@ class DesktopTest(unittest.TestCase):
         self.app.root.update()
 
     def fake_model(self, image, question, history, follow_up, on_first, context=None):
-        self.calls.append((image.copy(), question, history, follow_up))
+        self.calls.append((image.copy() if image is not None else None, question, history, follow_up))
         on_first({**ANSWER, "segments": ANSWER["segments"][:1]})
         self.gate.wait(3)
         return ANSWER
@@ -780,6 +780,74 @@ class DesktopTest(unittest.TestCase):
             self.assertEqual(seen, [([], None), ([], None)])
             recall.assert_not_called()
             notes.assert_not_called()
+
+    def test_typing_and_voice_leave_screenshot_topic_without_a_reset_phrase(self):
+        app = self.app
+        for voice in (False, True):
+            app._send_capture(Image.new("RGB", (24, 24), "red"))
+            self.until(lambda: not app.awaiting_answer)
+            previous = app.topic
+            app.show_input()
+            app.input_var.set("具体怎么改？")
+            app._placeholder_active = False
+            app.capture_choice.invoke()
+            app.submit_input()
+            self.until(lambda: not app.awaiting_answer)
+            self.assertTrue(self.calls[-1][3])
+            self.assertIsNotNone(self.calls[-1][0])
+            self.assertFalse(app.attach_capture.get())
+            question = "今晚吃什么？"
+            if voice:
+                token = app.voice_turn = threading.Event()
+                app._voice_result(token, question, "")
+            else:
+                app.show_input()
+                app._entry_clear_placeholder()
+                app.input_var.set(question)
+                app.submit_input()
+            self.until(lambda: not app.awaiting_answer)
+            self.assertEqual(self.calls[-1], (None, question, [], False))
+            self.assertIsNone(app.last_image)
+            self.assertNotEqual(app.topic, previous)
+            self.assertEqual(app.canvas.itemcget(app.capture_window, "state"), "hidden")
+
+    def test_resize_panel_by_pixels_and_drag_without_changing_the_pet(self):
+        app = self.app
+        pet_size = (app.poses["wait"].width(), app.poses["wait"].height())
+        with tempfile.TemporaryDirectory() as tmp, patch("pet.config.CONFIG_PATH", Path(tmp) / "cfg"):
+            app.show_panel_size()
+            dlg = app.dialog
+            dlg.update()
+            dlg.size.set("3 x 2")
+            dlg.apply_button.invoke()
+            dlg.update()
+            self.assertIs(app.dialog, dlg)
+            dlg.size.set("640 × 398")
+            dlg.apply_button.invoke()
+            self.until(lambda: app.dialog is None)
+            self.assertTrue(app.panel_open)
+            self.assertEqual((app.root.winfo_width(), app.root.winfo_height()), (640+app.PET_WIDTH, 398))
+            app.show_input()
+            app._entry_clear_placeholder()
+            app.input_var.set("没写完的文字")
+            app._show_content("A sentence. " * 120, "继续说。" * 120, duration=20)
+            grip = app.root.nametowidget(app.canvas.itemcget(app.grip_window, "window"))
+            grip.event_generate("<ButtonPress-1>", x=5, y=5, rootx=300, rooty=200)
+            grip.event_generate("<B1-Motion>", x=50, y=35, rootx=345, rooty=230)
+            grip.event_generate("<ButtonRelease-1>", x=55, y=41, rootx=350, rooty=236)
+            app.root.update()
+            self.assertEqual(app.cfg["panel_size"], {"width": 690, "height": 434})
+            self.assertEqual(json.loads((Path(tmp)/"cfg").read_text("utf8"))["panel_size"], app.cfg["panel_size"])
+            self.assertEqual(app.input_var.get(), "没写完的文字")
+            self.assertIsNotNone(app.captions.timer)
+            self.assertEqual(app.captions.winfo_width(), app.subtitle_width)
+            self.assertEqual((app.poses["wait"].width(), app.poses["wait"].height()), pet_size)
+            app._close_panel()
+            app.root.update()
+            self.assertEqual((app.root.winfo_width(), app.root.winfo_height()), (app.PET_WIDTH, 430))
+            app._open_panel()
+            app.root.update()
+            self.assertEqual((app.root.winfo_width(), app.root.winfo_height()), (690+app.PET_WIDTH, 434))
 
     def test_gpu_renderer_is_reused_for_input_and_released_on_hide(self):
         app = self.app

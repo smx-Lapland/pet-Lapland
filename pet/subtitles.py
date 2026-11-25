@@ -43,6 +43,19 @@ class ScrollingCaptions(tk.Canvas):
             self.backgrounds.append(image)
             track.itemconfigure("background", image=image)
 
+    def resize_width(self, width):
+        if width == self.viewport:
+            return
+        self.viewport = width
+        self.configure(width=width)
+        for i, (track, item) in enumerate(zip(self.tracks, self.rows)):
+            track.configure(width=width)
+            track.itemconfigure(item, width=width - 4)
+            self._text(i, track.itemcget(item, "text"))
+        self._position(self.progress)
+        if self.duration and not self.manual and self.timer is None and any(self.overflow):
+            self._tick()
+
     def _text(self, i, text):
         track, item = self.tracks[i], self.rows[i]
         track.itemconfigure(item, text=" ".join(text.split()))

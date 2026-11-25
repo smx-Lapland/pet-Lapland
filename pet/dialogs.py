@@ -152,6 +152,47 @@ class CapturePreview(tk.Toplevel):
         self.on_cancel()
 
 
+class PanelSizeDialog(tk.Toplevel):
+    def __init__(self, root, size, limits, save, close):
+        super().__init__(root)
+        self.title("对话框尺寸")
+        self.transient(root)
+        self.attributes("-topmost", True)
+        self.resizable(False, False)
+        body = ttk.Frame(self, padding=14)
+        body.pack()
+        ttk.Label(body, text="宽 × 高（像素）").pack(anchor="w")
+        self.size = tk.StringVar(self, value=f"{size[0]} × {size[1]}")
+        min_w, min_h, max_w, max_h = limits
+        presets = [f"{w} × {h}" for w, h in ((600, 390), (793, 430), (960, 540), (1280, 720))
+                   if min_w <= w <= max_w and min_h <= h <= max_h]
+        box = ttk.Combobox(body, textvariable=self.size, values=presets)
+        box.pack(fill="x", pady=5)
+        ttk.Label(body, text=f"宽 {min_w}–{max_w}，高 {min_h}–{max_h}").pack(anchor="w")
+        error = ttk.Label(body, foreground="#A12622")
+        error.pack(anchor="w")
+
+        def apply(_event=None):
+            match = re.fullmatch(r"\s*(\d{1,5})\s*[xX×＊*]\s*(\d{1,5})\s*", self.size.get())
+            if match:
+                w, h = map(int, match.groups())
+                if min_w <= w <= max_w and min_h <= h <= max_h:
+                    save(w, h)
+                    close()
+                    return
+            error.configure(text="请输入范围内的宽 × 高，例如 793 × 430。")
+        actions = ttk.Frame(body)
+        actions.pack(anchor="e")
+        ttk.Button(actions, text="取消", command=close).pack(side="left", padx=5)
+        self.apply_button = ttk.Button(actions, text="应用", command=apply)
+        self.apply_button.pack(side="left")
+        self.bind("<Return>", apply)
+        self.bind("<Escape>", lambda _: close())
+        self.protocol("WM_DELETE_WINDOW", close)
+        self.grab_set()
+        box.focus_set()
+
+
 class SettingsDialog(tk.Toplevel):
     def __init__(self, root, cfg, save, close):
         super().__init__(root)

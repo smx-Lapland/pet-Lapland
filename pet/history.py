@@ -28,8 +28,22 @@ def _terms(text):
 
 
 def changes_subject(question):
-    return bool(re.search(r"换(?:个|一个)?话题|另一个问题|别提(?:刚才|上次)|不要(?:再)?(?:联系|参考|回顾)(?:之前|上次)|"
-                          r"\b(?:new topic|change the subject|cambiamo (?:argomento|discorso))\b", question, re.I))
+    return bool(re.search(r"换(?:个|一个)?话题|另一个问题|聊(?:点|些)别的|别提(?:刚才|上次)|不要(?:再)?(?:联系|参考|回顾)(?:之前|上次)|"
+                          r"(?:别|不想|不用|不要|不再|先不)(?:再)?(?:看|说|聊|提|管|参考)(?:刚才|之前|上|这|那|张|个|的)*(?:截图|图片|画面|图)|"
+                          r"(?:图片?|截图|画面)(?:先)?(?:不用|不看|别管|不说|不聊)|"
+                          r"\b(?:new topic|change the subject|ignore (?:that|the) screenshot|cambiamo (?:argomento|discorso))\b", question, re.I))
+
+
+def asks_about_capture(question):
+    """Only attach a saved selection when the question explicitly points to it."""
+    if changes_subject(question):
+        return False
+    return bool(re.search(
+        r"(?:这|那|上|刚才的)(?:一?张|个|幅)?(?:截图|图片|图像|画面|选区|图(?!书))|"
+        r"(?:截图|图片|画面|选区|^图)(?:里|中)|(?:截图|图片|画面|选区|^图)上(?:面|方|的|有|是|写|显示|说|标|画|第)|^追问截图|"
+        r"\b(?:in|on|from|look at|explain|what does) (?:this|that|the|my|the last) (?:screenshot|image|selection|picture)\b|"
+        r"^\s*(?:what|which) colou?r (?:remains|is that)\b|\b(?:nello screenshot|nell.immagine|in questa immagine|nella schermata)\b",
+        question, re.I))
 
 
 def requests_recall(question):
