@@ -10,11 +10,20 @@ pet-Lapland 可以看你框选的屏幕、陪你练口语，也可以在你选�
 
 ### macOS 源码版
 
-在 Mac 上安装带 Tcl/Tk 的 Python 3.12。下列命令下载含 macOS 启动器的分支，在项目内创建独立环境并启动桌宠。已下载此分支的用户可直接在含 `run_pet.command` 的目录从第三行开始。[Python 官方 macOS 安装包](https://www.python.org/downloads/macos/)
+Apple Silicon 和 Intel Mac 使用同一份源码。先安装带 Tcl/Tk 的 Python 3.12。[Python 官方 macOS 安装包](https://www.python.org/downloads/macos/)
+
+**下载 ZIP**　解压 Mac 适配分支的源码，在含有 `run_pet.command` 和 `requirements.txt` 的目录打开终端。[下载 Mac 版源码 ZIP](https://github.com/smx-Lapland/pet-Lapland/archive/refs/heads/codex/macos-support.zip)
+
+**使用 Git**　也可以在终端克隆适配分支并进入项目目录。
 
 ```sh
 git clone --branch codex/macos-support https://github.com/smx-Lapland/pet-Lapland.git
 cd pet-Lapland
+```
+
+取得源码后，在项目目录运行下面三行。
+
+```sh
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --prefer-binary -r requirements.txt
 sh run_pet.command
@@ -30,6 +39,14 @@ sh run_pet.command
 | 听英语或意大利语 | 在「设置…」选回答语言，语音服务选 `sapi` 即可调用 Mac 系统朗读。用 `say -v '?'` 查看已装音色，在「系统朗读音色」填写名称。未匹配时选择同语种已安装的音色 |
 | 使用麦克风 | 先运行 `.venv/bin/python tools/setup_voice_input.py` 安装本地识别模型，再点「按住说话」。首次收音在「隐私与安全性 → 麦克风」允许访问 |
 | 使用本地角色模型 | PocketTTS 可用 `.venv/bin/python tools/setup_lapland_voice.py` 准备模型。Mac 上的本地推理使用 CPU。第 4 节的 GPT-SoVITS 独立运行库、Qwen3 原声参考意配和 CUDA 安装步骤面向 Windows |
+
+**首次启动自检**
+
+1. 点角色打开对话框。按两次 **Control+Option+H**，确认桌宠可以隐藏并重新显示。
+2. 按第 2 节连接模型后，用 **Control+Option+Space** 输入「二加三是多少？」。看到外语回答和中文字幕，即可确认文字聊天已接通。
+3. 在「文本编辑」里写下 `apples = 3`，按 **Control+Option+S** 只框住这一行。在预览里核对选区，点「取消」即可完成截图检查。
+
+macOS 15 的 Apple Silicon 和 Intel 运行器各通过了 13 项自动测试，覆盖窗口打开与恢复、快捷键注册、系统朗读生成 WAV、单实例锁和流式回答解析。麦克风收音、扬声器播放以及屏幕录制授权可在自己的 Mac 上按上表试用。[查看两种架构的测试结果](https://github.com/smx-Lapland/pet-Lapland/actions/runs/45665114485)
 
 ### Windows 源码版与分享版
 
@@ -262,7 +279,7 @@ GPU 模式会在开始输入或收音时预热拉普兰德的语音模型。回�
 | 429 / 网络超时 | 检查服务额度、限流和服务运行状态。本地地址指运行桌宠的这台电脑 |
 | 能聊天却不能看图 | 确认模型具备视觉能力，兼容接口支持消息里的 `image_url` 数据。先用简单的记事本选区验证 |
 | 有字幕、无声音 | 检查静音和默认播放设备，切到 `sapi` 试同一语言。专用音色还需要额外模型 |
-| 麦克风没反应 | 检查默认输入设备、Windows 桌面应用麦克风权限和输入语言，运行语音输入安装命令补齐模型。连续对话可降低收音门槛重试 |
+| 麦克风没反应 | 检查默认输入设备和输入语言。macOS 在「隐私与安全性 → 麦克风」检查启动桌宠的应用权限，Windows 检查桌面应用麦克风权限。按第 4 节补齐识别模型 |
 | DSH 项目列表为空 | 在 DSH 中打开并登记工作区。有多套配置时，确认桌宠和 DSH 使用相同的 `DSH_HOME` |
 | 快捷键无效 | 右键菜单可直接操作；在「设置…」更换冲突热键。分享故障信息时只摘出必要的错误码 |
 
