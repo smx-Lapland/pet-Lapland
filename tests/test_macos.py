@@ -1,10 +1,14 @@
+import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -16,6 +20,19 @@ from pet.speech import SpeechEngine
 
 
 class MacRoutingTest(unittest.TestCase):
+    def test_saved_position_stays_on_a_visible_display(self):
+        from pet.app import MochiApp
+
+        # The left screen starts lower, leaving a gap above it inside the virtual desktop.
+        displays = [((0, 0, 1440, 900), (0, 25, 1440, 850)),
+                    ((-1280, 500, 0, 1300), (-1280, 525, 0, 1250))]
+        app = Mock(PET_WIDTH=170, PET_HEIGHT=430, H=430)
+        with patch.object(sys, "platform", "darwin"), patch("pet.screen._mac_displays", return_value=displays):
+            for x, y, expected in [(-900, 10, "+0+25"), (-900, 600, "+-900+600")]:
+                app.cfg = {"window": {"x": x, "y": y}}
+                MochiApp._place_initial(app)
+                app.root.geometry.assert_called_with("170x430" + expected)
+
     def test_default_shortcuts_have_distinct_native_keys(self):
         for action, code in {"capture": 1, "ask": 49, "toggle": 4, "quit": 12}.items():
             with self.subTest(action=action), patch.object(sys, "platform", "darwin"):
@@ -57,6 +74,80 @@ class MacRoutingTest(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "requires Aqua and the macOS event dispatcher")
 class NativeMacTest(unittest.TestCase):
+    def test_launcher_from_another_directory_and_duplicate_launch(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            install = Path(tmp) / "桌宠 source"
+            install.mkdir()
+            shutil.copytree(repo / "pet", install / "pet", ignore=shutil.ignore_patterns("__pycache__"))
+            (install / "assets").symlink_to(repo / "assets", target_is_directory=True)
+            (install / ".venv").symlink_to(sys.prefix, target_is_directory=True)
+            script = install / "run_pet.command"
+            shutil.copy2(repo / script.name, script)
+            args = ["/bin/sh", str(script), "--start-hidden"]
+            env = {**os.environ, "HOME": tmp, "DSH_HOME": str(Path(tmp) / ".dsh")}
+            log = install / "pet.log"
+            with subprocess.Popen(args, env=env, cwd=tmp) as first:
+                try:
+                    deadline = time.monotonic() + 25
+                    while not log.exists() or "started model=" not in log.read_text(encoding="utf-8"):
+                        self.assertIsNone(first.poll(), "launcher exited before the Tk application started")
+                        self.assertLess(time.monotonic(), deadline, "launcher did not reach the Tk event loop")
+                        time.sleep(.1)
+                    subprocess.run(args, env=env, cwd=tmp, check=True, timeout=10)
+                    self.assertIsNone(first.poll())
+                finally:
+                    if first.poll() is None:
+                        first.kill()
+
+    def test_secondary_click_cancels_capture_before_reading_pixels(self):
+        import tkinter as tk
+        from pet.screen import RegionSelector
+
+        root = tk.Tk()
+        self.addCleanup(root.destroy)
+        for gesture in ("<Button-2>", "<Control-Button-1>"):
+            with self.subTest(gesture=gesture):
+                sent, cancelled = Mock(), Mock()
+                selector = RegionSelector(root, sent, cancelled)
+                selector.start()
+                root.update()
+                selector.canvas.event_generate(gesture, x=25, y=25)
+                root.after(160, root.quit)
+                root.mainloop()
+                self.assertIsNone(selector.top)
+                cancelled.assert_called_once_with()
+                sent.assert_not_called()
+
+    def test_stopping_task_closes_descendants_that_hold_its_output(self):
+        from pet.dsh_tasks import Task, execute
+
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            job = Task("status")
+            ready = folder / "ready"
+            child = "from pathlib import Path; import time; Path('ready').touch(); time.sleep(12)"
+            parent = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child!r}])"
+
+            def stop_after_launch():
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(.03)
+                job.stop.set()
+
+            stopper = threading.Thread(target=stop_after_launch)
+            with patch("pet.dsh_tasks.projects", return_value={"p": Mock(path=folder)}), \
+                    patch("pet.dsh_tasks.project_context", return_value={}), \
+                    patch("pet.dsh_tasks.launcher", return_value=[sys.executable, "-c", parent]):
+                stopper.start()
+                start = time.monotonic()
+                try:
+                    self.assertEqual(execute("p", "", job), "")
+                finally:
+                    stopper.join()
+                self.assertTrue(ready.exists())
+                self.assertLess(time.monotonic() - start, 8)
+
     def test_system_speech_renders_pcm(self):
         with tempfile.TemporaryDirectory() as tmp, patch("pet.speech.CACHE_DIR", Path(tmp)):
             engine = SpeechEngine({"speech_provider": "sapi", "voice": "Samantha"}, Path("unused"))

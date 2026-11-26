@@ -31,6 +31,7 @@ from .hotkeys import HotkeyManager
 from .llm import DeepSeekClient, LLMError
 from .screen import (
     RegionSelector,
+    SECONDARY_CLICKS,
     capture_region,
     save_debug_capture,
     virtual_screen,
@@ -224,13 +225,14 @@ class MochiApp:
     def _place_initial(self) -> None:
         saved = self.cfg.get("window") or {}
         x, y = saved.get("x"), saved.get("y")
-        left, top, right, bottom = work_area()
-        if not isinstance(x, int) or not isinstance(y, int):
+        if isinstance(x, int) and isinstance(y, int):
+            left, top, right, bottom = work_area(x + self.PET_WIDTH // 2, y + self.PET_HEIGHT // 2)
+        else:
+            left, top, right, bottom = work_area()
             x = right - self.PET_WIDTH - 26
             y = bottom - self.H - 18
-        vx, vy, vw, vh = virtual_screen()
-        x = max(vx, min(int(x), vx + vw - self.PET_WIDTH))
-        y = max(vy, min(int(y), vy + vh - self.H))
+        x = max(left, min(x, right - self.PET_WIDTH))
+        y = max(top, min(y, bottom - self.H))
         self.root.geometry(f"{self.PET_WIDTH}x{self.H}+{x}+{y}")
 
     def _save_position(self) -> None:
@@ -901,9 +903,8 @@ class MochiApp:
         return "Unmute voice" if self.speech.muted else "Mute voice"
 
     def _bind_events(self) -> None:
-        clicks = ("<Button-2>", "<Button-3>", "<Control-Button-1>") if sys.platform == "darwin" else ("<Button-3>",)
         for widget in (self.canvas, self.captions, *self.captions.tracks):
-            for click in clicks:
+            for click in SECONDARY_CLICKS:
                 widget.bind(click, self._popup_menu)
         self.root.bind("<Control-Return>", lambda _e: self.submit_input())
 

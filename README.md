@@ -10,7 +10,7 @@ pet-Lapland 可以看你框选的屏幕、陪你练口语，也可以在你选�
 
 ### macOS 源码版
 
-Apple Silicon 和 Intel Mac 使用同一份源码。先安装带 Tcl/Tk 的 Python 3.12。[Python 官方 macOS 安装包](https://www.python.org/downloads/macos/)
+Apple Silicon 和 Intel Mac 使用同一份源码。使用 python.org 安装包时，请选择带 Tcl/Tk 的 Python 3.12，并双击「应用程序 → Python 3.12 → Install Certificates.command」安装 HTTPS 根证书。如果能打开桌宠，但连接模型时报 `CERTIFICATE_VERIFY_FAILED`，先确认这一步已成功。[Python 官方 macOS 安装包](https://www.python.org/downloads/macos/) · [官方安装说明](https://docs.python.org/3/using/mac.html#getting-and-installing-macpython)
 
 **下载 ZIP**　解压 Mac 适配分支的源码，在含有 `run_pet.command` 和 `requirements.txt` 的目录打开终端。[下载 Mac 版源码 ZIP](https://github.com/smx-Lapland/pet-Lapland/archive/refs/heads/codex/macos-support.zip)
 
@@ -48,7 +48,7 @@ sh run_pet.command
 2. 按第 2 节连接模型后，用 **Control+Option+Space** 输入「二加三是多少？」。看到外语回答和中文字幕，即可确认文字聊天已接通。
 3. 在「文本编辑」里写下 `apples = 3`，按 **Control+Option+S** 只框住这一行。在预览里核对选区，点「取消」即可完成截图检查。
 
-macOS 15 的 Apple Silicon 和 Intel 运行器各通过了 13 项自动测试，覆盖窗口打开与恢复、快捷键注册、系统朗读生成 WAV、单实例锁和流式回答解析。麦克风收音、扬声器播放以及屏幕录制授权可在自己的 Mac 上按上表试用。[查看两种架构的测试结果](https://github.com/smx-Lapland/pet-Lapland/actions/runs/45665114485)
+每次更新适配分支，GitHub 都会在 macOS 15 的 Apple Silicon 和 Intel 运行器上安装依赖、运行 `run_pet.command`，并测试窗口恢复、快捷键注册、取消框选、系统朗读生成 WAV 和停止 DSH 任务。麦克风收音、扬声器播放及屏幕录制权限可按上表在自己的 Mac 上检查。[查看两种架构最近的测试结果](https://github.com/smx-Lapland/pet-Lapland/actions/workflows/macos.yml?query=branch%3Acodex%2Fmacos-support)
 
 ### Windows 源码版与分享版
 
@@ -275,7 +275,7 @@ GPU 模式会在开始输入或收音时预热拉普兰德的语音模型。回�
 
 | 现象 | 先查什么 |
 |---|---|
-| 双击没有窗口 | 在源码目录用 `.\.venv\Scripts\python.exe -m pet.main` 看启动错误。已启动时按 `Ctrl+Alt+H` 切换显示 |
+| 双击没有窗口 | 在源码目录打开终端，Mac 运行 `sh run_pet.command`，Windows 运行 `.\.venv\Scripts\python.exe -m pet.main`，查看报错。Mac 上已启动的桌宠可点击 Dock 图标找回 |
 | 401 / 403 | 核对接口域名、变量名、模型权限。修改用户环境变量后从新进程启动 |
 | 404 / 模型列表为空 | 检查基础地址是否重复带了 `/chat/completions` 或 `/v1`。服务未实现列表接口时手填真实模型 ID |
 | 429 / 网络超时 | 检查服务额度、限流和服务运行状态。本地地址指运行桌宠的这台电脑 |

@@ -15,6 +15,7 @@ log = logging.getLogger("mochi.screen")
 
 TRANSPARENT = "#010203"
 ACCENT = "#6EE7C7"
+SECONDARY_CLICKS = ("<Button-2>", "<Button-3>", "<Control-Button-1>") if sys.platform == "darwin" else ("<Button-3>",)
 
 
 def set_dpi_awareness() -> None:
@@ -169,11 +170,12 @@ class RegionSelector:
         canvas.bind("<ButtonPress-1>", self._press)
         canvas.bind("<B1-Motion>", self._drag)
         canvas.bind("<ButtonRelease-1>", self._release)
-        canvas.bind("<Button-3>", lambda _e: self._cancel())
+        for click in SECONDARY_CLICKS:
+            canvas.bind(click, lambda _e: self._cancel())
         top.bind("<Escape>", lambda _e: self._cancel())
         top.bind("<Return>", lambda _e: self._cancel())
         top.protocol("WM_DELETE_WINDOW", self._cancel)
-        top.after(80, lambda: self._safe_focus(top))
+        self.root.after(80, lambda: self._safe_focus(top))
 
     @staticmethod
     def _safe_focus(top: tk.Toplevel) -> None:
