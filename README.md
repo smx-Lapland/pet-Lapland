@@ -14,6 +14,8 @@ Apple Silicon 和 Intel Mac 使用同一份源码。先安装带 Tcl/Tk 的 Pyth
 
 **下载 ZIP**　解压 Mac 适配分支的源码，在含有 `run_pet.command` 和 `requirements.txt` 的目录打开终端。[下载 Mac 版源码 ZIP](https://github.com/smx-Lapland/pet-Lapland/archive/refs/heads/codex/macos-support.zip)
 
+**Mac 启动时报 `AttributeError: module 'ctypes' has no attribute 'WinDLL'`**　如果解压目录名含 `lapland-bilingual-preview`，你打开的是使用 Windows 启动代码的双语预览包。请从上面的 Mac 版链接重新下载，解压到新目录，确认里面有 `run_pet.command`，再在该目录按下方三行命令创建环境并启动。
+
 **使用 Git**　也可以在终端克隆适配分支并进入项目目录。
 
 ```sh
